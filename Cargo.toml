@@ -1,0 +1,64 @@
+[package]
+edition      = "2024"
+name         = "gse_integrated_board"
+rust-version = "1.88"
+version      = "0.1.0"
+
+[[bin]]
+name = "gse_integrated_board"
+path = "./src/bin/main.rs"
+
+[dependencies]
+esp-hal = { version = "1.1.1", features = ["esp32", "unstable","log-04"] }
+
+esp-rtos = { version = "0.3.0", features = ["embassy",  "esp-alloc",
+  "esp-radio", "esp32","log-04"] }
+
+esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32"] }
+
+embassy-executor = { version = "0.10.0", features = [] }
+embassy-time = "0.5.1"
+esp-backtrace = { version = "0.19.0", features = [
+  "esp32",
+  "panic-handler",
+  "println",
+] }
+esp-alloc = { version = "0.10.0", features = ["global-allocator"] }
+embassy-net = { version = "0.9.1", features = [
+  "dhcpv4",
+  "log",
+  "medium-ethernet",
+  "tcp",
+  "udp",
+] }
+
+esp-println = { version = "0.17.0", features = ["log-04","esp32"] }
+critical-section = "1.2.0"
+static_cell      = "2.1.1"
+log = "0.4.29"
+nb = "1.1.0"
+embedded-can = "0.4.1"
+embedded-io-async = "0.7.0"
+embassy-sync = "0.8.0"
+embassy-futures = "0.1.2"
+
+esp-radio = { version = "0.18.0", features = [
+  "esp32",
+  "unstable",
+  "wifi",
+  "esp-now",
+] }
+
+[profile.dev]
+# Rust debug is too slow.
+# For debug builds always builds with some optimization
+opt-level = "s"
+
+[profile.release]
+codegen-units    = 1     # LLVM can perform better optimizations using a single thread
+debug            = 2
+debug-assertions = false
+incremental      = false
+lto              = 'fat'
+opt-level        = 's'
+overflow-checks  = false
