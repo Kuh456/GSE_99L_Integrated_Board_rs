@@ -13,21 +13,19 @@ use crate::{
     CAN_TEC, CAN_TX_ERROR_COUNT, CAN_TX_FRAME_CREATE_FAILED, CAN_TX_TIMEOUT, CAN_TX_TIMEOUT_MS,
     COMMUNICATION_TIMEOUT_MS, CURRENT_POSITION, FAULT_FLAGS, INPUT_CAN_LINK_ACTIVE,
     INPUT_DUMP_REQUEST, INPUT_FILL_REQUEST, INPUT_FIRE_REQUEST, INPUT_FLAGS, INPUT_GPIO_STATUS,
-    INPUT_O2_TEST_REQUEST, INPUT_SEPARATE_REQUEST, INPUT_VALVE_OPEN_REQUEST,
-    INPUT_VALVE_SET_REQUEST, OUTPUT_STATUS,
+    INPUT_O2_TEST_REQUEST, INPUT_RESET_ACK_REQUEST, INPUT_SEPARATE_REQUEST,
+    INPUT_VALVE_OPEN_REQUEST, INPUT_VALVE_SET_REQUEST, OUTPUT_STATUS,
     can::{
         health::{CanHealth, classify_can_health},
         protocol::{CAN_ID_BUTTON_FROM_CTRL_PANEL, CanDecodeError, GseCanMessage},
         tx::{CanTxError, create_frame_from_message, transmit_frame_with_timeout},
     },
-    position_to_angle_x10, replace_operator_input_flags, sequence_phase, set_fault_flags,
+    position_to_angle_x10, replace_operator_input_flags,
+    replace_operator_input_flags_and_set_can_link_active, sequence_phase, set_fault_flags,
     update_input_flag,
 };
 
 const CAN_HEALTH_MONITOR_INTERVAL_MS: u64 = 100;
-// Status TX remains stopped until explicit reset, but fresh RX commands can resume in Abort.
-const CAN_TX_INHIBIT_FAULTS: u8 =
-    CAN_PEER_LOST | CAN_BUS_OFF | CAN_TX_TIMEOUT | CAN_TX_FRAME_CREATE_FAILED;
 
 #[embassy_executor::task]
 pub async fn can_manager_task(mut can: twai::Twai<'static, Async>) {
@@ -40,8 +38,7 @@ pub async fn can_manager_task(mut can: twai::Twai<'static, Async>) {
     update_can_health(&can);
 
     loop {
-        if FAULT_FLAGS.load(Ordering::Acquire) & CAN_TX_INHIBIT_FAULTS == 0 {
-            // Explicit fault clearing begins a new CAN fault/restart cycle.
+        if CAN_HEALTH.load(Ordering::Acquire) != CanHealth::BusOff as u8 {
             restart_attempted = false;
         }
 
@@ -49,10 +46,10 @@ pub async fn can_manager_task(mut can: twai::Twai<'static, Async>) {
         match select3(can.receive_async(), tx_ticker.next(), health_ticker.next()).await {
             Either3::First(receive_result) => match receive_result {
                 Ok(frame) => {
-                    if handle_received_frame(&frame) {
+                    let health = update_can_health(&can);
+                    if handle_received_frame(&frame, health) {
                         last_peer_rx = Some(Instant::now());
                     }
-                    update_can_health(&can);
                 }
                 Err(error) => {
                     record_rx_error(error, &can);
@@ -81,7 +78,7 @@ pub async fn can_manager_task(mut can: twai::Twai<'static, Async>) {
         }
 
         if try_restart && !restart_attempted {
-            // Restore receive/health servicing once; latched faults still inhibit all new TX.
+            // Restore receive/health servicing once; current health controls future TX.
             can = can.stop().start();
             restart_attempted = true;
         } else if try_restart {
@@ -90,7 +87,7 @@ pub async fn can_manager_task(mut can: twai::Twai<'static, Async>) {
     }
 }
 
-fn handle_received_frame(frame: &EspTwaiFrame) -> bool {
+fn handle_received_frame(frame: &EspTwaiFrame, health: CanHealth) -> bool {
     let id = match frame.id() {
         Id::Standard(id) => id.as_raw(),
         Id::Extended(_) => return false,
@@ -98,10 +95,14 @@ fn handle_received_frame(frame: &EspTwaiFrame) -> bool {
 
     match GseCanMessage::decode_standard(id, frame.data()) {
         Ok(GseCanMessage::ButtonFromCtrlPanel { raw }) => {
+            if health == CanHealth::BusOff {
+                inhibit_can_inputs();
+                return false;
+            }
+
             // A valid fresh command frame makes operator input trustworthy again. Latched CAN
             // fault flags remain for status/reset policy, and the supervisor keeps Abort.
-            update_input_flag(INPUT_CAN_LINK_ACTIVE, true);
-            replace_operator_input_flags(button_inputs(raw));
+            replace_operator_input_flags_and_set_can_link_active(button_inputs(raw));
             true
         }
         Err(CanDecodeError::InvalidDlc {
@@ -138,6 +139,9 @@ fn button_inputs(raw: u8) -> u32 {
     if raw & (1 << 6) != 0 {
         inputs |= INPUT_VALVE_OPEN_REQUEST;
     }
+    if raw & (1 << 7) != 0 {
+        inputs |= INPUT_RESET_ACK_REQUEST;
+    }
     inputs
 }
 
@@ -156,7 +160,7 @@ fn update_peer_liveness(start: Instant, last_peer_rx: Option<Instant>) {
 }
 
 fn can_tx_allowed() -> bool {
-    FAULT_FLAGS.load(Ordering::Acquire) & CAN_TX_INHIBIT_FAULTS == 0
+    CAN_HEALTH.load(Ordering::Acquire) != CanHealth::BusOff as u8
 }
 
 async fn transmit_status(can: &mut twai::Twai<'static, Async>) -> Result<(), CanTxError> {
@@ -253,6 +257,7 @@ fn handle_can_error(error: EspTwaiError, can: &twai::Twai<'static, Async>) {
         EspTwaiError::EmbeddedHAL(TwaiErrorKind::Overrun) => {
             can.clear_receive_fifo();
             inhibit_can_inputs();
+            set_fault_flags(CAN_PEER_LOST);
         }
         EspTwaiError::EmbeddedHAL(_) | EspTwaiError::NonCompliantDlc(_) => {}
     }
@@ -263,4 +268,81 @@ fn inhibit_can_inputs() {
         update_input_flag(INPUT_CAN_LINK_ACTIVE, false);
     }
     replace_operator_input_flags(0);
+}
+
+#[cfg(test)]
+mod tests {
+    use core::sync::atomic::Ordering;
+
+    use esp_hal::twai::StandardId;
+
+    use super::*;
+    use crate::{
+        CAN_FAULTS, INPUT_COMMAND_MASK, INPUT_RESET_ACK_REQUEST, INPUT_VALVE_OPEN_REQUEST,
+    };
+
+    fn reset_state() {
+        FAULT_FLAGS.store(0, Ordering::Release);
+        INPUT_FLAGS.store(0, Ordering::Release);
+        CAN_HEALTH.store(CanHealth::Active as u8, Ordering::Release);
+    }
+
+    fn button_frame(raw: u8) -> EspTwaiFrame {
+        let id = StandardId::new(CAN_ID_BUTTON_FROM_CTRL_PANEL).unwrap();
+        EspTwaiFrame::new(id, &[raw]).unwrap()
+    }
+
+    #[test]
+    fn valid_button_restores_link_and_inputs_with_can_fault_history() {
+        reset_state();
+        FAULT_FLAGS.store(CAN_PEER_LOST, Ordering::Release);
+
+        assert!(handle_received_frame(
+            &button_frame(1 << 1),
+            CanHealth::Active,
+        ));
+
+        let inputs = INPUT_FLAGS.load(Ordering::Acquire);
+        assert_ne!(inputs & INPUT_CAN_LINK_ACTIVE, 0);
+        assert_ne!(inputs & INPUT_FIRE_REQUEST, 0);
+        assert_eq!(
+            FAULT_FLAGS.load(Ordering::Acquire) & CAN_PEER_LOST,
+            CAN_PEER_LOST
+        );
+    }
+
+    #[test]
+    fn current_bus_off_rejects_button_and_inhibits_inputs() {
+        reset_state();
+        INPUT_FLAGS.store(
+            INPUT_CAN_LINK_ACTIVE | INPUT_FIRE_REQUEST | INPUT_DUMP_REQUEST,
+            Ordering::Release,
+        );
+
+        assert!(!handle_received_frame(
+            &button_frame(1 << 6),
+            CanHealth::BusOff,
+        ));
+
+        let inputs = INPUT_FLAGS.load(Ordering::Acquire);
+        assert_eq!(inputs & INPUT_CAN_LINK_ACTIVE, 0);
+        assert_eq!(inputs & INPUT_COMMAND_MASK, 0);
+    }
+
+    #[test]
+    fn button_bit7_maps_to_reset_ack() {
+        assert_eq!(button_inputs(1 << 7), INPUT_RESET_ACK_REQUEST);
+        assert_eq!(button_inputs(1 << 6), INPUT_VALVE_OPEN_REQUEST);
+    }
+
+    #[test]
+    fn tx_allowed_uses_current_health_not_latched_fault_history() {
+        reset_state();
+        FAULT_FLAGS.store(CAN_FAULTS, Ordering::Release);
+        CAN_HEALTH.store(CanHealth::Active as u8, Ordering::Release);
+        assert!(can_tx_allowed());
+
+        CAN_HEALTH.store(CanHealth::BusOff as u8, Ordering::Release);
+        assert!(!can_tx_allowed());
+    }
 }

@@ -50,7 +50,9 @@ pub const CAN_TX_TIMEOUT: u8 = 1 << 6;
 pub const CAN_TX_FRAME_CREATE_FAILED: u8 = 1 << 7;
 pub const CAN_FAULTS: u8 =
     CAN_PEER_LOST | CAN_BUS_OFF | CAN_TX_TIMEOUT | CAN_TX_FRAME_CREATE_FAILED;
+pub const RECOVERABLE_CAN_FAULTS: u8 = CAN_PEER_LOST | CAN_TX_TIMEOUT;
 pub const SERVO_FAULTS: u8 = SERVO_COMM_ERROR | SERVO_POS_ERROR;
+pub const HARD_OUTPUT_INHIBIT_FAULTS: u8 = IGNITION_TIMEOUT | POWER_ERROR;
 
 pub static FAULT_FLAGS: AtomicU8 = AtomicU8::new(0);
 
@@ -76,13 +78,15 @@ pub const INPUT_SEPARATE_REQUEST: u32 = 1 << 11;
 pub const INPUT_VALVE_SET_REQUEST: u32 = 1 << 12;
 pub const INPUT_O2_TEST_REQUEST: u32 = 1 << 13;
 pub const INPUT_VALVE_OPEN_REQUEST: u32 = 1 << 14;
-pub const INPUT_COMMAND_MASK: u32 = INPUT_FIRE_REQUEST
+pub const INPUT_RESET_ACK_REQUEST: u32 = 1 << 15;
+pub const INPUT_OPERATOR_ACTION_MASK: u32 = INPUT_FIRE_REQUEST
     | INPUT_DUMP_REQUEST
     | INPUT_FILL_REQUEST
     | INPUT_SEPARATE_REQUEST
     | INPUT_VALVE_SET_REQUEST
     | INPUT_O2_TEST_REQUEST
     | INPUT_VALVE_OPEN_REQUEST;
+pub const INPUT_COMMAND_MASK: u32 = INPUT_OPERATOR_ACTION_MASK | INPUT_RESET_ACK_REQUEST;
 
 pub static INPUT_FLAGS: AtomicU32 = AtomicU32::new(0);
 
@@ -99,6 +103,14 @@ pub fn replace_operator_input_flags(flags: u32) {
     let operator_flags = flags & INPUT_COMMAND_MASK;
     let _ = INPUT_FLAGS.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
         Some((current & !INPUT_COMMAND_MASK) | operator_flags)
+    });
+    CONTROL_UPDATE_SIGNAL.signal(());
+}
+
+pub fn replace_operator_input_flags_and_set_can_link_active(flags: u32) {
+    let operator_flags = flags & INPUT_COMMAND_MASK;
+    let _ = INPUT_FLAGS.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+        Some((current & !INPUT_COMMAND_MASK) | operator_flags | INPUT_CAN_LINK_ACTIVE)
     });
     CONTROL_UPDATE_SIGNAL.signal(());
 }
@@ -181,12 +193,11 @@ pub fn resolve_control(
     intent: ControlIntent,
 ) -> ControlDecision {
     let operator_input_available = input_flags & INPUT_CAN_LINK_ACTIVE != 0;
-    let unresolved_non_can_faults = fault_flags & !CAN_FAULTS;
-    let output_inhibited = !operator_input_available || unresolved_non_can_faults != 0;
+    let hard_output_inhibited = fault_flags & HARD_OUTPUT_INHIBIT_FAULTS != 0;
     let allow_new_ignition =
         phase == SequencePhase::Idle && operator_input_available && fault_flags == 0;
 
-    if output_inhibited {
+    if !operator_input_available || hard_output_inhibited {
         return ControlDecision {
             ignition_on: false,
             dump_on: false,
@@ -198,15 +209,26 @@ pub fn resolve_control(
         };
     }
 
+    let manual_phase = matches!(
+        phase,
+        SequencePhase::Idle | SequencePhase::Timeout | SequencePhase::Abort
+    );
+    let firing_phase = phase == SequencePhase::Firing;
+    let servo_allowed = fault_flags & SERVO_FAULTS == 0 && !(firing_phase && fault_flags != 0);
+
     ControlDecision {
-        ignition_on: phase == SequencePhase::Firing && intent.ignition_on,
+        ignition_on: firing_phase && intent.ignition_on && fault_flags == 0,
         dump_on: intent.dump_on,
-        fill_on: intent.fill_on,
-        separate_on: intent.separate_on,
-        o2_on: intent.o2_on,
-        servo_action: match intent.servo_target_angle_x10 {
-            Some(angle) => ServoAction::MoveTo(angle),
-            None => ServoAction::Hold,
+        fill_on: manual_phase && intent.fill_on,
+        separate_on: manual_phase && intent.separate_on,
+        o2_on: (manual_phase || firing_phase) && intent.o2_on,
+        servo_action: if servo_allowed {
+            match intent.servo_target_angle_x10 {
+                Some(angle) => ServoAction::MoveTo(angle),
+                None => ServoAction::Hold,
+            }
+        } else {
+            ServoAction::Hold
         },
         allow_new_ignition,
     }
