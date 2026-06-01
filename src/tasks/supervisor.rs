@@ -2,19 +2,60 @@ use core::sync::atomic::Ordering;
 
 use embassy_futures::select::{Either, select};
 use embassy_time::{Duration, Instant, Ticker};
-use esp_hal::gpio::Output;
+use esp_hal::gpio::{Input, Output};
 
 use crate::{
     ANGLE_COMMAND_SIGNAL, CAN_FAULTS, CONTROL_UPDATE_SIGNAL, ControlDecision, ControlIntent,
-    FAULT_FLAGS, FIRING_TOTAL_TIMEOUT_MS, IGNITION_WAIT_MS, INPUT_CAN_LINK_ACTIVE,
+    FAULT_FLAGS, FIRING_TOTAL_TIMEOUT_MS, IGNITION_WAIT_MS, IN_IGNITER_POWER_PRESENT,
+    IN_RELAY_12V_ON, IN_RELAY_24V_ON, IN_SOLENOID_POWER_PRESENT, INPUT_CAN_LINK_ACTIVE,
     INPUT_COMMAND_MASK, INPUT_DUMP_REQUEST, INPUT_FILL_REQUEST, INPUT_FIRE_REQUEST, INPUT_FLAGS,
-    INPUT_O2_TEST_REQUEST, INPUT_SEPARATE_REQUEST, INPUT_VALVE_OPEN_REQUEST,
+    INPUT_GPIO_STATUS, INPUT_O2_TEST_REQUEST, INPUT_SEPARATE_REQUEST, INPUT_VALVE_OPEN_REQUEST,
     INPUT_VALVE_SET_REQUEST, MAIN_VALVE_CLOSED_ANGLE_X10, MAIN_VALVE_OPEN_ANGLE_X10,
-    MAIN_VALVE_OPEN_DELAY_MS, OUTPUT_DUMP_ON, OUTPUT_FILL_ON, OUTPUT_IGNITION_ON, OUTPUT_O2_ON,
-    OUTPUT_SEPARATE_ON, OUTPUT_STATUS, SERVO_CONTROL_MODE, SERVO_MODE_COMMAND, SERVO_MODE_HOLD,
-    SERVO_TARGET_ANGLE_X10, SUPERVISOR_INTERVAL_MS, SequencePhase, ServoAction, resolve_control,
-    sequence_phase, set_sequence_phase,
+    MAIN_VALVE_OPEN_DELAY_MS, OUT_DUMP, OUT_FILL, OUT_IGNITER, OUT_O2, OUT_SEPARATE, OUTPUT_STATUS,
+    SERVO_CONTROL_MODE, SERVO_MODE_COMMAND, SERVO_MODE_HOLD, SERVO_TARGET_ANGLE_X10,
+    SUPERVISOR_INTERVAL_MS, SequencePhase, ServoAction, resolve_control, sequence_phase,
+    set_sequence_phase,
 };
+
+pub struct InputGpioPins {
+    solenoid_power_check: Input<'static>,
+    relay_12v_check: Input<'static>,
+    igniter_power_check: Input<'static>,
+    relay_24v_check: Input<'static>,
+}
+
+impl InputGpioPins {
+    pub fn new(
+        solenoid_power_check: Input<'static>,
+        relay_12v_check: Input<'static>,
+        igniter_power_check: Input<'static>,
+        relay_24v_check: Input<'static>,
+    ) -> Self {
+        Self {
+            solenoid_power_check,
+            relay_12v_check,
+            igniter_power_check,
+            relay_24v_check,
+        }
+    }
+
+    fn status(&self) -> u8 {
+        let mut status = 0;
+        if self.solenoid_power_check.is_high() {
+            status |= IN_SOLENOID_POWER_PRESENT;
+        }
+        if self.relay_12v_check.is_high() {
+            status |= IN_RELAY_12V_ON;
+        }
+        if self.igniter_power_check.is_high() {
+            status |= IN_IGNITER_POWER_PRESENT;
+        }
+        if self.relay_24v_check.is_high() {
+            status |= IN_RELAY_24V_ON;
+        }
+        status
+    }
+}
 
 #[embassy_executor::task]
 pub async fn supervisor_task(
@@ -23,6 +64,7 @@ pub async fn supervisor_task(
     mut fill: Output<'static>,
     mut separate: Output<'static>,
     mut o2: Output<'static>,
+    input_gpio_pins: InputGpioPins,
 ) {
     let mut ticker = Ticker::every(Duration::from_millis(SUPERVISOR_INTERVAL_MS));
     let mut previous_inputs = 0u32;
@@ -38,6 +80,7 @@ pub async fn supervisor_task(
         }
 
         let now = Instant::now();
+        INPUT_GPIO_STATUS.store(input_gpio_pins.status(), Ordering::Release);
         let inputs = INPUT_FLAGS.load(Ordering::Acquire);
         let faults = FAULT_FLAGS.load(Ordering::Acquire);
         let fire_requested = inputs & INPUT_FIRE_REQUEST != 0;
@@ -181,19 +224,19 @@ fn apply_decision(
 
     let mut output_status = 0;
     if decision.dump_on {
-        output_status |= OUTPUT_DUMP_ON;
+        output_status |= OUT_DUMP;
     }
     if decision.ignition_on {
-        output_status |= OUTPUT_IGNITION_ON;
+        output_status |= OUT_IGNITER;
     }
     if decision.fill_on {
-        output_status |= OUTPUT_FILL_ON;
+        output_status |= OUT_FILL;
     }
     if decision.separate_on {
-        output_status |= OUTPUT_SEPARATE_ON;
+        output_status |= OUT_SEPARATE;
     }
     if decision.o2_on {
-        output_status |= OUTPUT_O2_ON;
+        output_status |= OUT_O2;
     }
     OUTPUT_STATUS.store(output_status, Ordering::Release);
 

@@ -23,7 +23,11 @@ use esp_hal::{
 use esp_rtos::embassy::Executor;
 use gse_integrated_board::{
     krs_servo::IcsDevice,
-    tasks::{can_communication::can_manager_task, servo::servo_task, supervisor::supervisor_task},
+    tasks::{
+        can_communication::can_manager_task,
+        servo::servo_task,
+        supervisor::{InputGpioPins, supervisor_task},
+    },
 };
 use static_cell::StaticCell;
 
@@ -53,6 +57,14 @@ async fn main(spawner: Spawner) -> ! {
     let servo_tx = Output::new(peripherals.GPIO16, Level::Low, OutputConfig::default());
     let servo_rx = Input::new(peripherals.GPIO14, InputConfig::default());
     let servo_enable = Output::new(peripherals.GPIO27, Level::Low, OutputConfig::default());
+
+    let solenoid_power_check_pin = Input::new(peripherals.GPIO23, InputConfig::default());
+    let relay_12v_check_pin = Input::new(peripherals.GPIO22, InputConfig::default());
+    let igniter_power_check_pin = Input::new(peripherals.GPIO34, InputConfig::default());
+    let relay_24v_check_pin = Input::new(peripherals.GPIO35, InputConfig::default());
+
+    let _led_sequence_state = Output::new(peripherals.GPIO19, Level::Low, OutputConfig::default());
+    let _led_servo_com_state = Output::new(peripherals.GPIO21, Level::Low, OutputConfig::default());
 
     let uart_config = UartConfig::default()
         .with_baudrate(115_200)
@@ -98,7 +110,22 @@ async fn main(spawner: Spawner) -> ! {
     );
 
     spawner.spawn(servo_task(servo).unwrap());
-    spawner.spawn(supervisor_task(ignition, dump, fill, separate, o2).unwrap());
+    spawner.spawn(
+        supervisor_task(
+            ignition,
+            dump,
+            fill,
+            separate,
+            o2,
+            InputGpioPins::new(
+                solenoid_power_check_pin,
+                relay_12v_check_pin,
+                igniter_power_check_pin,
+                relay_24v_check_pin,
+            ),
+        )
+        .unwrap(),
+    );
 
     pending::<()>().await;
     unreachable!()

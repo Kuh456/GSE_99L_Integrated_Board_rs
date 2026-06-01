@@ -13,8 +13,8 @@ use crate::{
     CAN_STATUS_TX_INTERVAL_MS, CAN_TEC, CAN_TX_ERROR_COUNT, CAN_TX_FRAME_CREATE_FAILED,
     CAN_TX_TIMEOUT, CAN_TX_TIMEOUT_MS, COMMUNICATION_TIMEOUT_MS, CURRENT_POSITION, FAULT_FLAGS,
     INPUT_CAN_LINK_ACTIVE, INPUT_DUMP_REQUEST, INPUT_FILL_REQUEST, INPUT_FIRE_REQUEST, INPUT_FLAGS,
-    INPUT_O2_TEST_REQUEST, INPUT_SEPARATE_REQUEST, INPUT_VALVE_OPEN_REQUEST,
-    INPUT_VALVE_SET_REQUEST, OUTPUT_STATUS, SERVO_FAULTS,
+    INPUT_GPIO_STATUS, INPUT_O2_TEST_REQUEST, INPUT_SEPARATE_REQUEST, INPUT_VALVE_OPEN_REQUEST,
+    INPUT_VALVE_SET_REQUEST, OUTPUT_STATUS,
     can::{
         health::{CanHealth, classify_can_health},
         protocol::{CAN_ID_BUTTON_FROM_CTRL_PANEL, CanDecodeError, GseCanMessage},
@@ -26,7 +26,7 @@ use crate::{
 
 const CAN_HEALTH_MONITOR_INTERVAL_MS: u64 = 100;
 // A lost command peer is unsafe for this board, so status TX remains stopped until explicit reset.
-const CAN_TX_INHIBIT_FAULTS: u32 =
+const CAN_TX_INHIBIT_FAULTS: u8 =
     CAN_PEER_LOST | CAN_BUS_OFF | CAN_TX_TIMEOUT | CAN_TX_FRAME_CREATE_FAILED;
 
 #[embassy_executor::task]
@@ -169,18 +169,15 @@ fn can_tx_allowed() -> bool {
 
 async fn transmit_status(can: &mut twai::Twai<'static, Async>) -> Result<(), CanTxError> {
     let phase = sequence_phase() as u8;
-    let solenoids = OUTPUT_STATUS.load(Ordering::Acquire);
+    let output_bits = OUTPUT_STATUS.load(Ordering::Acquire);
+    let input_bits = INPUT_GPIO_STATUS.load(Ordering::Acquire);
     let angle_x10 = position_to_angle_x10(CURRENT_POSITION.load(Ordering::Acquire));
-    let servo_error = FAULT_FLAGS.load(Ordering::Acquire) & SERVO_FAULTS != 0;
+    let flags = FAULT_FLAGS.load(Ordering::Acquire);
 
-    transmit(can, GseCanMessage::SequenceState { phase }).await?;
-    transmit(can, GseCanMessage::SolenoidState { bits: solenoids }).await?;
+    transmit(can, GseCanMessage::OutputGpioStatus { output_bits }).await?;
+    transmit(can, GseCanMessage::InputGpioStatus { input_bits }).await?;
     transmit(can, GseCanMessage::MainValveAngleToCtrlPanel { angle_x10 }).await?;
-    transmit(
-        can,
-        GseCanMessage::ServoCommunicationState { error: servo_error },
-    )
-    .await
+    transmit(can, GseCanMessage::InternalStatus { phase, flags }).await
 }
 
 async fn transmit(

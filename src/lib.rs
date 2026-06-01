@@ -9,8 +9,8 @@ use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal}
 
 pub use can::health::CanHealth;
 pub use can::protocol::{
-    CAN_ID_BUTTON_FROM_CTRL_PANEL, CAN_ID_SEND_MAIN_ANGLE_TO_CTRL_PANEL, CAN_ID_SEQUENCE_STATE,
-    CAN_ID_SERVO_COMMUNICATION_STATE, CAN_ID_SOLENOID_STATE,
+    CAN_ID_BUTTON_FROM_CTRL_PANEL, CAN_ID_INPUT_GPIO_STATUS, CAN_ID_INTERNAL_STATUS,
+    CAN_ID_MAIN_VALVE_ANGLE_TO_CTRL_PANEL, CAN_ID_OUTPUT_GPIO_STATUS,
 };
 
 pub const COMMUNICATION_TIMEOUT_MS: u64 = 3000;
@@ -39,22 +39,22 @@ pub const SERVO_ERROR_LIMIT: u8 = 10;
 
 // Latched fault flags. Fault removal is an explicit reset operation, never a side effect of
 // receiving traffic again.
-pub const CAN_PEER_LOST: u32 = 1 << 0;
-pub const CAN_BUS_OFF: u32 = 1 << 1;
-pub const SERVO_COMM_ERROR: u32 = 1 << 2;
-pub const SERVO_POS_ERROR: u32 = 1 << 3;
+pub const CAN_PEER_LOST: u8 = 1 << 0;
+pub const CAN_BUS_OFF: u8 = 1 << 1;
+pub const SERVO_COMM_ERROR: u8 = 1 << 2;
+pub const SERVO_POS_ERROR: u8 = 1 << 3;
 // Reserved for an abnormal ignition watchdog fault; normal Firing completion is Timeout.
-pub const IGNITION_TIMEOUT: u32 = 1 << 4;
-pub const POWER_ERROR: u32 = 1 << 5;
-pub const CAN_TX_TIMEOUT: u32 = 1 << 6;
-pub const CAN_TX_FRAME_CREATE_FAILED: u32 = 1 << 7;
-pub const CAN_FAULTS: u32 =
+pub const IGNITION_TIMEOUT: u8 = 1 << 4;
+pub const POWER_ERROR: u8 = 1 << 5;
+pub const CAN_TX_TIMEOUT: u8 = 1 << 6;
+pub const CAN_TX_FRAME_CREATE_FAILED: u8 = 1 << 7;
+pub const CAN_FAULTS: u8 =
     CAN_PEER_LOST | CAN_BUS_OFF | CAN_TX_TIMEOUT | CAN_TX_FRAME_CREATE_FAILED;
-pub const SERVO_FAULTS: u32 = SERVO_COMM_ERROR | SERVO_POS_ERROR;
+pub const SERVO_FAULTS: u8 = SERVO_COMM_ERROR | SERVO_POS_ERROR;
 
-pub static FAULT_FLAGS: AtomicU32 = AtomicU32::new(0);
+pub static FAULT_FLAGS: AtomicU8 = AtomicU8::new(0);
 
-pub fn set_fault_flags(flags: u32) {
+pub fn set_fault_flags(flags: u8) {
     let previous = FAULT_FLAGS.fetch_or(flags, Ordering::AcqRel);
     if previous & flags != flags {
         CONTROL_UPDATE_SIGNAL.signal(());
@@ -62,7 +62,7 @@ pub fn set_fault_flags(flags: u32) {
 }
 
 /// Clears latched faults only when an explicit reset policy has approved it.
-pub fn clear_fault_flags_for_reset(flags: u32) {
+pub fn clear_fault_flags_for_reset(flags: u8) {
     FAULT_FLAGS.fetch_and(!flags, Ordering::AcqRel);
     CONTROL_UPDATE_SIGNAL.signal(());
 }
@@ -176,7 +176,7 @@ pub struct ControlDecision {
 
 pub fn resolve_control(
     phase: SequencePhase,
-    fault_flags: u32,
+    fault_flags: u8,
     input_flags: u32,
     intent: ControlIntent,
 ) -> ControlDecision {
@@ -210,12 +210,21 @@ pub fn resolve_control(
     }
 }
 
-pub const OUTPUT_DUMP_ON: u8 = 1 << 0;
-pub const OUTPUT_IGNITION_ON: u8 = 1 << 1;
-pub const OUTPUT_FILL_ON: u8 = 1 << 2;
-pub const OUTPUT_SEPARATE_ON: u8 = 1 << 3;
-pub const OUTPUT_O2_ON: u8 = 1 << 4;
+// OutputGpioStatus payload bits.
+pub const OUT_DUMP: u8 = 1 << 0;
+pub const OUT_FILL: u8 = 1 << 1;
+pub const OUT_SEPARATE: u8 = 1 << 2;
+pub const OUT_O2: u8 = 1 << 3;
+pub const OUT_IGNITER: u8 = 1 << 4;
+pub const OUT_SPARE_SOLENOID: u8 = 1 << 5;
 pub static OUTPUT_STATUS: AtomicU8 = AtomicU8::new(0);
+
+// InputGpioStatus payload bits.
+pub const IN_SOLENOID_POWER_PRESENT: u8 = 1 << 0;
+pub const IN_RELAY_12V_ON: u8 = 1 << 1;
+pub const IN_IGNITER_POWER_PRESENT: u8 = 1 << 2;
+pub const IN_RELAY_24V_ON: u8 = 1 << 3;
+pub static INPUT_GPIO_STATUS: AtomicU8 = AtomicU8::new(0);
 
 pub const SERVO_MODE_HOLD: u8 = 0;
 pub const SERVO_MODE_COMMAND: u8 = 1;
