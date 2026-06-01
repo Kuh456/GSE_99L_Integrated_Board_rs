@@ -13,8 +13,8 @@ use crate::{
     INPUT_VALVE_SET_REQUEST, MAIN_VALVE_CLOSED_ANGLE_X10, MAIN_VALVE_OPEN_ANGLE_X10,
     MAIN_VALVE_OPEN_DELAY_MS, OUT_DUMP, OUT_FILL, OUT_IGNITER, OUT_O2, OUT_SEPARATE, OUTPUT_STATUS,
     SERVO_CONTROL_MODE, SERVO_MODE_COMMAND, SERVO_MODE_HOLD, SERVO_TARGET_ANGLE_X10,
-    SUPERVISOR_INTERVAL_MS, SequencePhase, ServoAction, resolve_control, sequence_phase,
-    set_sequence_phase,
+    SUPERVISOR_INTERVAL_MS, SequencePhase, ServoAction, replace_operator_input_flags,
+    resolve_control, sequence_phase, set_sequence_phase,
 };
 
 pub struct InputGpioPins {
@@ -67,11 +67,8 @@ pub async fn supervisor_task(
     input_gpio_pins: InputGpioPins,
 ) {
     let mut ticker = Ticker::every(Duration::from_millis(SUPERVISOR_INTERVAL_MS));
-    let mut previous_inputs = 0u32;
-    let mut ignition_armed = false;
     let mut firing_started_at: Option<Instant> = None;
     let mut abort_before_firing = false;
-    let mut previous_phase = sequence_phase();
     let mut previous_servo_action = ServoAction::Hold;
 
     loop {
@@ -83,90 +80,57 @@ pub async fn supervisor_task(
         INPUT_GPIO_STATUS.store(input_gpio_pins.status(), Ordering::Release);
         let inputs = INPUT_FLAGS.load(Ordering::Acquire);
         let faults = FAULT_FLAGS.load(Ordering::Acquire);
-        let fire_requested = inputs & INPUT_FIRE_REQUEST != 0;
-        let fire_rising = fire_requested && previous_inputs & INPUT_FIRE_REQUEST == 0;
-        let can_available = inputs & INPUT_CAN_LINK_ACTIVE != 0 && faults & CAN_FAULTS == 0;
-        let sequence_inhibited = !can_available || faults != 0;
 
-        let active_phase = sequence_phase();
-        if active_phase == SequencePhase::Abort && previous_phase != SequencePhase::Abort {
-            abort_before_firing = previous_phase == SequencePhase::Idle;
-        }
-
-        if sequence_inhibited && active_phase == SequencePhase::Firing {
-            abort_before_firing = false;
-            set_sequence_phase(SequencePhase::Abort);
+        if has_active_can_input_fault(faults, inputs) {
+            replace_operator_input_flags(0);
+            enter_abort(sequence_phase(), &mut abort_before_firing);
             firing_started_at = None;
-            ignition_armed = false;
+            apply_decision(
+                force_safe_outputs(),
+                &mut ignition,
+                &mut dump,
+                &mut fill,
+                &mut separate,
+                &mut o2,
+                &mut previous_servo_action,
+            );
+            continue;
         }
 
-        let mut intent = ControlIntent::safe();
-        let phase = sequence_phase();
-        match phase {
-            SequencePhase::Idle => {
-                firing_started_at = None;
+        if faults != 0 && sequence_phase() == SequencePhase::Firing {
+            enter_abort(SequencePhase::Firing, &mut abort_before_firing);
+            firing_started_at = None;
+            apply_decision(
+                force_safe_outputs(),
+                &mut ignition,
+                &mut dump,
+                &mut fill,
+                &mut separate,
+                &mut o2,
+                &mut previous_servo_action,
+            );
+            continue;
+        }
 
-                let start_permission =
-                    resolve_control(SequencePhase::Idle, faults, inputs, ControlIntent::safe())
-                        .allow_new_ignition;
-                if start_permission && !fire_requested {
-                    ignition_armed = true;
-                } else if !start_permission {
-                    ignition_armed = false;
-                }
-
-                if start_permission && ignition_armed && fire_rising {
-                    ignition_armed = false;
-                    abort_before_firing = false;
-                    firing_started_at = Some(now);
-                    set_sequence_phase(SequencePhase::Firing);
-                    intent.dump_on = inputs & INPUT_DUMP_REQUEST != 0;
-                    intent.o2_on = true;
-                } else {
-                    intent = idle_intent(inputs);
-                }
-            }
-            SequencePhase::Firing => {
-                let start = firing_started_at.get_or_insert(now);
-                let elapsed = now.duration_since(*start);
-                intent.dump_on = inputs & INPUT_DUMP_REQUEST != 0;
-
-                if elapsed >= Duration::from_millis(FIRING_TOTAL_TIMEOUT_MS) {
-                    firing_started_at = None;
-                    set_sequence_phase(SequencePhase::Timeout);
-                    intent = idle_intent(inputs);
-                } else if elapsed
-                    >= Duration::from_millis(IGNITION_WAIT_MS + MAIN_VALVE_OPEN_DELAY_MS)
-                {
-                    intent.o2_on = false;
-                    intent.servo_target_angle_x10 = Some(MAIN_VALVE_OPEN_ANGLE_X10);
-                } else if elapsed >= Duration::from_millis(IGNITION_WAIT_MS) {
-                    intent.o2_on = true;
-                    intent.ignition_on = true;
-                } else {
-                    intent.o2_on = true;
-                }
-            }
+        let intent = match sequence_phase() {
+            SequencePhase::Idle => handle_idle_phase(
+                inputs,
+                faults,
+                now,
+                &mut firing_started_at,
+                &mut abort_before_firing,
+            ),
+            SequencePhase::Firing => handle_firing_phase(inputs, now, &mut firing_started_at),
             SequencePhase::Timeout => {
-                abort_before_firing = false;
-                firing_started_at = None;
-                ignition_armed = false;
-                intent = idle_intent(inputs);
+                handle_timeout_phase(inputs, &mut firing_started_at, &mut abort_before_firing)
             }
-            SequencePhase::Abort => {
-                firing_started_at = None;
-                ignition_armed = false;
-
-                if abort_before_firing
-                    && faults == 0
-                    && inputs & INPUT_COMMAND_MASK == 0
-                    && can_available
-                {
-                    abort_before_firing = false;
-                    set_sequence_phase(SequencePhase::Idle);
-                }
-            }
-        }
+            SequencePhase::Abort => handle_abort_phase(
+                inputs,
+                faults,
+                &mut firing_started_at,
+                &mut abort_before_firing,
+            ),
+        };
 
         let decision = resolve_control(
             sequence_phase(),
@@ -183,12 +147,81 @@ pub async fn supervisor_task(
             &mut o2,
             &mut previous_servo_action,
         );
-        previous_inputs = inputs;
-        previous_phase = sequence_phase();
     }
 }
 
-fn idle_intent(inputs: u32) -> ControlIntent {
+fn handle_idle_phase(
+    inputs: u32,
+    faults: u8,
+    now: Instant,
+    firing_started_at: &mut Option<Instant>,
+    abort_before_firing: &mut bool,
+) -> ControlIntent {
+    *firing_started_at = None;
+
+    let start_permission =
+        resolve_control(SequencePhase::Idle, faults, inputs, ControlIntent::safe())
+            .allow_new_ignition;
+
+    if start_permission && inputs & INPUT_FIRE_REQUEST != 0 {
+        *abort_before_firing = false;
+        *firing_started_at = Some(now);
+        set_sequence_phase(SequencePhase::Firing);
+        return apply_firing_sequence_outputs(inputs, Duration::from_millis(0));
+    }
+
+    apply_manual_outputs(inputs, false)
+}
+
+fn handle_firing_phase(
+    inputs: u32,
+    now: Instant,
+    firing_started_at: &mut Option<Instant>,
+) -> ControlIntent {
+    let start = firing_started_at.get_or_insert(now);
+    let elapsed = now.duration_since(*start);
+
+    if elapsed >= Duration::from_millis(FIRING_TOTAL_TIMEOUT_MS) {
+        *firing_started_at = None;
+        set_sequence_phase(SequencePhase::Timeout);
+        return apply_manual_outputs(inputs, true);
+    }
+
+    apply_firing_sequence_outputs(inputs, elapsed)
+}
+
+fn handle_timeout_phase(
+    inputs: u32,
+    firing_started_at: &mut Option<Instant>,
+    abort_before_firing: &mut bool,
+) -> ControlIntent {
+    *abort_before_firing = false;
+    *firing_started_at = None;
+    apply_manual_outputs(inputs, true)
+}
+
+fn handle_abort_phase(
+    inputs: u32,
+    faults: u8,
+    firing_started_at: &mut Option<Instant>,
+    abort_before_firing: &mut bool,
+) -> ControlIntent {
+    *firing_started_at = None;
+
+    if *abort_before_firing
+        && faults == 0
+        && inputs & INPUT_COMMAND_MASK == 0
+        && inputs & INPUT_CAN_LINK_ACTIVE != 0
+    {
+        *abort_before_firing = false;
+        set_sequence_phase(SequencePhase::Idle);
+        return apply_manual_outputs(inputs, false);
+    }
+
+    apply_manual_outputs(inputs, true)
+}
+
+fn apply_manual_outputs(inputs: u32, fire_means_main_valve_open: bool) -> ControlIntent {
     let mut intent = ControlIntent {
         ignition_on: false,
         dump_on: inputs & INPUT_DUMP_REQUEST != 0,
@@ -198,13 +231,60 @@ fn idle_intent(inputs: u32) -> ControlIntent {
         servo_target_angle_x10: None,
     };
 
+    let main_valve_open_requested = inputs & INPUT_VALVE_OPEN_REQUEST != 0
+        || (fire_means_main_valve_open && inputs & INPUT_FIRE_REQUEST != 0);
+
     if inputs & INPUT_VALVE_SET_REQUEST != 0 {
         intent.servo_target_angle_x10 = Some(MAIN_VALVE_CLOSED_ANGLE_X10);
-    } else if inputs & INPUT_VALVE_OPEN_REQUEST != 0 {
+    } else if main_valve_open_requested {
         intent.servo_target_angle_x10 = Some(MAIN_VALVE_OPEN_ANGLE_X10);
     }
 
     intent
+}
+
+fn apply_firing_sequence_outputs(inputs: u32, elapsed: Duration) -> ControlIntent {
+    let mut intent = ControlIntent::safe();
+    intent.dump_on = inputs & INPUT_DUMP_REQUEST != 0;
+
+    if elapsed >= Duration::from_millis(IGNITION_WAIT_MS + MAIN_VALVE_OPEN_DELAY_MS) {
+        intent.servo_target_angle_x10 = Some(MAIN_VALVE_OPEN_ANGLE_X10);
+    } else if elapsed >= Duration::from_millis(IGNITION_WAIT_MS) {
+        intent.o2_on = true;
+        intent.ignition_on = true;
+    } else {
+        intent.o2_on = true;
+    }
+
+    intent
+}
+
+fn force_safe_outputs() -> ControlDecision {
+    ControlDecision {
+        ignition_on: false,
+        dump_on: false,
+        fill_on: false,
+        separate_on: false,
+        o2_on: false,
+        servo_action: ServoAction::MoveTo(MAIN_VALVE_CLOSED_ANGLE_X10),
+        allow_new_ignition: false,
+    }
+}
+
+fn has_active_can_input_fault(faults: u8, inputs: u32) -> bool {
+    faults & CAN_FAULTS != 0 && inputs & INPUT_CAN_LINK_ACTIVE == 0
+}
+
+#[cfg(test)]
+fn clear_operator_inputs(inputs: u32) -> u32 {
+    inputs & !INPUT_COMMAND_MASK
+}
+
+fn enter_abort(current_phase: SequencePhase, abort_before_firing: &mut bool) {
+    if current_phase != SequencePhase::Abort {
+        *abort_before_firing = current_phase == SequencePhase::Idle;
+        set_sequence_phase(SequencePhase::Abort);
+    }
 }
 
 fn apply_decision(
@@ -253,4 +333,176 @@ fn apply_decision(
         }
     }
     *previous_servo_action = decision.servo_action;
+}
+
+#[cfg(test)]
+mod tests {
+    use core::sync::atomic::Ordering;
+
+    use embassy_time::{Duration, Instant};
+
+    use super::*;
+    use crate::{
+        CAN_PEER_LOST, INPUT_CAN_LINK_ACTIVE, MAIN_VALVE_CLOSED_ANGLE_X10,
+        MAIN_VALVE_OPEN_ANGLE_X10, SEQUENCE_PHASE, SequencePhase, ServoAction, sequence_phase,
+    };
+
+    fn set_phase(phase: SequencePhase) {
+        SEQUENCE_PHASE.store(phase as u8, Ordering::Release);
+    }
+
+    #[test]
+    fn idle_fire_starts_firing_without_manual_valve_open() {
+        set_phase(SequencePhase::Idle);
+        let mut started_at = None;
+        let mut abort_before_firing = true;
+        let now = Instant::from_millis(100);
+
+        let intent = handle_idle_phase(
+            INPUT_CAN_LINK_ACTIVE | INPUT_FIRE_REQUEST,
+            0,
+            now,
+            &mut started_at,
+            &mut abort_before_firing,
+        );
+
+        assert_eq!(sequence_phase(), SequencePhase::Firing);
+        assert_eq!(started_at, Some(now));
+        assert!(!abort_before_firing);
+        assert_eq!(intent.servo_target_angle_x10, None);
+        assert!(intent.o2_on);
+    }
+
+    #[test]
+    fn timeout_fire_is_manual_main_valve_open_without_firing_restart() {
+        set_phase(SequencePhase::Timeout);
+        let mut started_at = Some(Instant::from_millis(1));
+        let mut abort_before_firing = true;
+
+        let intent = handle_timeout_phase(
+            INPUT_CAN_LINK_ACTIVE | INPUT_FIRE_REQUEST,
+            &mut started_at,
+            &mut abort_before_firing,
+        );
+
+        assert_eq!(sequence_phase(), SequencePhase::Timeout);
+        assert_eq!(started_at, None);
+        assert!(!abort_before_firing);
+        assert_eq!(
+            intent.servo_target_angle_x10,
+            Some(MAIN_VALVE_OPEN_ANGLE_X10)
+        );
+    }
+
+    #[test]
+    fn abort_fire_is_manual_main_valve_open_without_firing_restart() {
+        set_phase(SequencePhase::Abort);
+        let mut started_at = Some(Instant::from_millis(1));
+        let mut abort_before_firing = false;
+
+        let intent = handle_abort_phase(
+            INPUT_CAN_LINK_ACTIVE | INPUT_FIRE_REQUEST,
+            CAN_PEER_LOST,
+            &mut started_at,
+            &mut abort_before_firing,
+        );
+        let decision = resolve_control(
+            SequencePhase::Abort,
+            CAN_PEER_LOST,
+            INPUT_CAN_LINK_ACTIVE | INPUT_FIRE_REQUEST,
+            intent,
+        );
+
+        assert_eq!(sequence_phase(), SequencePhase::Abort);
+        assert_eq!(started_at, None);
+        assert_eq!(
+            decision.servo_action,
+            ServoAction::MoveTo(MAIN_VALVE_OPEN_ANGLE_X10)
+        );
+        assert!(!decision.ignition_on);
+    }
+
+    #[test]
+    fn firing_fire_does_not_apply_manual_main_valve_open() {
+        let intent = apply_firing_sequence_outputs(
+            INPUT_FIRE_REQUEST,
+            Duration::from_millis(IGNITION_WAIT_MS + MAIN_VALVE_OPEN_DELAY_MS - 1),
+        );
+
+        assert_eq!(intent.servo_target_angle_x10, None);
+        assert!(intent.ignition_on);
+    }
+
+    #[test]
+    fn firing_dump_is_the_only_manual_output_override() {
+        let intent = apply_firing_sequence_outputs(
+            INPUT_DUMP_REQUEST
+                | INPUT_FILL_REQUEST
+                | INPUT_SEPARATE_REQUEST
+                | INPUT_O2_TEST_REQUEST,
+            Duration::from_millis(0),
+        );
+
+        assert!(intent.dump_on);
+        assert!(!intent.fill_on);
+        assert!(!intent.separate_on);
+        assert!(intent.o2_on);
+    }
+
+    #[test]
+    fn active_can_fault_enters_abort_from_manual_phases() {
+        set_phase(SequencePhase::Idle);
+        let mut abort_before_firing = false;
+        enter_abort(sequence_phase(), &mut abort_before_firing);
+        assert_eq!(sequence_phase(), SequencePhase::Abort);
+        assert!(abort_before_firing);
+
+        set_phase(SequencePhase::Timeout);
+        abort_before_firing = true;
+        enter_abort(sequence_phase(), &mut abort_before_firing);
+        assert_eq!(sequence_phase(), SequencePhase::Abort);
+        assert!(!abort_before_firing);
+
+        abort_before_firing = true;
+        enter_abort(sequence_phase(), &mut abort_before_firing);
+        assert_eq!(sequence_phase(), SequencePhase::Abort);
+        assert!(abort_before_firing);
+    }
+
+    #[test]
+    fn active_can_fault_clears_operator_inputs_and_forces_safe_outputs() {
+        let inputs = INPUT_CAN_LINK_ACTIVE | INPUT_FIRE_REQUEST | INPUT_DUMP_REQUEST;
+        let cleared = clear_operator_inputs(inputs);
+        let decision = force_safe_outputs();
+
+        assert!(has_active_can_input_fault(
+            CAN_PEER_LOST,
+            INPUT_FIRE_REQUEST
+        ));
+        assert!(!has_active_can_input_fault(
+            CAN_PEER_LOST,
+            INPUT_CAN_LINK_ACTIVE
+        ));
+        assert_eq!(cleared, INPUT_CAN_LINK_ACTIVE);
+        assert!(!decision.ignition_on);
+        assert!(!decision.dump_on);
+        assert_eq!(
+            decision.servo_action,
+            ServoAction::MoveTo(MAIN_VALVE_CLOSED_ANGLE_X10)
+        );
+    }
+
+    #[test]
+    fn recovered_can_button_can_drive_manual_outputs_while_abort_latched() {
+        let inputs = INPUT_CAN_LINK_ACTIVE | INPUT_FIRE_REQUEST | INPUT_FILL_REQUEST;
+        let intent = apply_manual_outputs(inputs, true);
+        let decision = resolve_control(SequencePhase::Abort, CAN_PEER_LOST, inputs, intent);
+
+        assert_eq!(
+            decision.servo_action,
+            ServoAction::MoveTo(MAIN_VALVE_OPEN_ANGLE_X10)
+        );
+        assert!(decision.fill_on);
+        assert!(!decision.ignition_on);
+    }
 }

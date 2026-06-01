@@ -180,9 +180,11 @@ pub fn resolve_control(
     input_flags: u32,
     intent: ControlIntent,
 ) -> ControlDecision {
-    let can_available = input_flags & INPUT_CAN_LINK_ACTIVE != 0 && fault_flags & CAN_FAULTS == 0;
-    let output_inhibited = !can_available || fault_flags != 0 || phase == SequencePhase::Abort;
-    let allow_new_ignition = phase == SequencePhase::Idle && can_available && fault_flags == 0;
+    let operator_input_available = input_flags & INPUT_CAN_LINK_ACTIVE != 0;
+    let unresolved_non_can_faults = fault_flags & !CAN_FAULTS;
+    let output_inhibited = !operator_input_available || unresolved_non_can_faults != 0;
+    let allow_new_ignition =
+        phase == SequencePhase::Idle && operator_input_available && fault_flags == 0;
 
     if output_inhibited {
         return ControlDecision {

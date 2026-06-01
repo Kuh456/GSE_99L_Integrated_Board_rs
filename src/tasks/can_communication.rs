@@ -9,11 +9,11 @@ use esp_hal::{
 };
 
 use crate::{
-    CAN_BUS_OFF, CAN_FAULTS, CAN_HEALTH, CAN_PEER_LOST, CAN_REC, CAN_RX_ERROR_COUNT,
-    CAN_STATUS_TX_INTERVAL_MS, CAN_TEC, CAN_TX_ERROR_COUNT, CAN_TX_FRAME_CREATE_FAILED,
-    CAN_TX_TIMEOUT, CAN_TX_TIMEOUT_MS, COMMUNICATION_TIMEOUT_MS, CURRENT_POSITION, FAULT_FLAGS,
-    INPUT_CAN_LINK_ACTIVE, INPUT_DUMP_REQUEST, INPUT_FILL_REQUEST, INPUT_FIRE_REQUEST, INPUT_FLAGS,
-    INPUT_GPIO_STATUS, INPUT_O2_TEST_REQUEST, INPUT_SEPARATE_REQUEST, INPUT_VALVE_OPEN_REQUEST,
+    CAN_BUS_OFF, CAN_HEALTH, CAN_PEER_LOST, CAN_REC, CAN_RX_ERROR_COUNT, CAN_STATUS_TX_INTERVAL_MS,
+    CAN_TEC, CAN_TX_ERROR_COUNT, CAN_TX_FRAME_CREATE_FAILED, CAN_TX_TIMEOUT, CAN_TX_TIMEOUT_MS,
+    COMMUNICATION_TIMEOUT_MS, CURRENT_POSITION, FAULT_FLAGS, INPUT_CAN_LINK_ACTIVE,
+    INPUT_DUMP_REQUEST, INPUT_FILL_REQUEST, INPUT_FIRE_REQUEST, INPUT_FLAGS, INPUT_GPIO_STATUS,
+    INPUT_O2_TEST_REQUEST, INPUT_SEPARATE_REQUEST, INPUT_VALVE_OPEN_REQUEST,
     INPUT_VALVE_SET_REQUEST, OUTPUT_STATUS,
     can::{
         health::{CanHealth, classify_can_health},
@@ -25,7 +25,7 @@ use crate::{
 };
 
 const CAN_HEALTH_MONITOR_INTERVAL_MS: u64 = 100;
-// A lost command peer is unsafe for this board, so status TX remains stopped until explicit reset.
+// Status TX remains stopped until explicit reset, but fresh RX commands can resume in Abort.
 const CAN_TX_INHIBIT_FAULTS: u8 =
     CAN_PEER_LOST | CAN_BUS_OFF | CAN_TX_TIMEOUT | CAN_TX_FRAME_CREATE_FAILED;
 
@@ -98,14 +98,10 @@ fn handle_received_frame(frame: &EspTwaiFrame) -> bool {
 
     match GseCanMessage::decode_standard(id, frame.data()) {
         Ok(GseCanMessage::ButtonFromCtrlPanel { raw }) => {
-            if FAULT_FLAGS.load(Ordering::Acquire) & CAN_FAULTS == 0 {
-                replace_operator_input_flags(button_inputs(raw));
-                update_input_flag(INPUT_CAN_LINK_ACTIVE, true);
-            } else {
-                inhibit_can_inputs();
-            }
-            // Keep liveness observation current while faults remain latched; valid traffic does
-            // not re-enable commands or clear faults without an explicit reset.
+            // A valid fresh command frame makes operator input trustworthy again. Latched CAN
+            // fault flags remain for status/reset policy, and the supervisor keeps Abort.
+            update_input_flag(INPUT_CAN_LINK_ACTIVE, true);
+            replace_operator_input_flags(button_inputs(raw));
             true
         }
         Err(CanDecodeError::InvalidDlc {
@@ -153,13 +149,9 @@ fn update_peer_liveness(start: Instant, last_peer_rx: Option<Instant>) {
         }
         None => now.duration_since(start) >= Duration::from_millis(COMMUNICATION_TIMEOUT_MS),
     };
-    let bus_off_latched = FAULT_FLAGS.load(Ordering::Acquire) & CAN_BUS_OFF != 0;
-
-    if timed_out || bus_off_latched {
+    if timed_out {
         inhibit_can_inputs();
-        if timed_out {
-            set_fault_flags(CAN_PEER_LOST);
-        }
+        set_fault_flags(CAN_PEER_LOST);
     }
 }
 
@@ -213,8 +205,8 @@ fn update_can_health(can: &twai::Twai<'static, Async>) -> CanHealth {
     let health = classify_can_health(tec, rec, can.is_bus_off());
     CAN_HEALTH.store(health as u8, Ordering::Release);
     if health == CanHealth::BusOff {
-        set_fault_flags(CAN_BUS_OFF);
         inhibit_can_inputs();
+        set_fault_flags(CAN_BUS_OFF);
     }
     health
 }
@@ -223,21 +215,21 @@ fn record_tx_error(error: CanTxError, can: &twai::Twai<'static, Async>) {
     match error {
         CanTxError::FrameCreateFailed => {
             CAN_TX_ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
-            set_fault_flags(CAN_TX_FRAME_CREATE_FAILED);
             inhibit_can_inputs();
+            set_fault_flags(CAN_TX_FRAME_CREATE_FAILED);
         }
         CanTxError::TimedOutUnknownState => {
             CAN_TX_ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
             // Timeout only proves that completion was not observed; it is not safe to retry.
-            set_fault_flags(CAN_TX_TIMEOUT);
             inhibit_can_inputs();
+            set_fault_flags(CAN_TX_TIMEOUT);
             update_can_health(can);
         }
         CanTxError::BusOff => {
             CAN_TX_ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
             CAN_HEALTH.store(CanHealth::BusOff as u8, Ordering::Release);
-            set_fault_flags(CAN_BUS_OFF);
             inhibit_can_inputs();
+            set_fault_flags(CAN_BUS_OFF);
         }
         CanTxError::TransmitFailed => {
             CAN_TX_ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -255,8 +247,8 @@ fn handle_can_error(error: EspTwaiError, can: &twai::Twai<'static, Async>) {
     match error {
         EspTwaiError::BusOff => {
             CAN_HEALTH.store(CanHealth::BusOff as u8, Ordering::Release);
-            set_fault_flags(CAN_BUS_OFF);
             inhibit_can_inputs();
+            set_fault_flags(CAN_BUS_OFF);
         }
         EspTwaiError::EmbeddedHAL(TwaiErrorKind::Overrun) => {
             can.clear_receive_fifo();
