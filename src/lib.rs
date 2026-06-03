@@ -50,9 +50,10 @@ pub const CAN_TX_TIMEOUT: u8 = 1 << 6;
 pub const CAN_TX_FRAME_CREATE_FAILED: u8 = 1 << 7;
 pub const CAN_FAULTS: u8 =
     CAN_PEER_LOST | CAN_BUS_OFF | CAN_TX_TIMEOUT | CAN_TX_FRAME_CREATE_FAILED;
-pub const RECOVERABLE_CAN_FAULTS: u8 = CAN_PEER_LOST | CAN_TX_TIMEOUT;
+pub const RECOVERABLE_CAN_FAULTS: u8 = CAN_PEER_LOST;
 pub const SERVO_FAULTS: u8 = SERVO_COMM_ERROR | SERVO_POS_ERROR;
-pub const HARD_OUTPUT_INHIBIT_FAULTS: u8 = IGNITION_TIMEOUT | POWER_ERROR;
+pub const HARD_OUTPUT_INHIBIT_FAULTS: u8 =
+    IGNITION_TIMEOUT | POWER_ERROR | CAN_TX_FRAME_CREATE_FAILED;
 
 pub static FAULT_FLAGS: AtomicU8 = AtomicU8::new(0);
 
@@ -100,7 +101,7 @@ pub fn update_input_flag(flag: u32, asserted: bool) {
 }
 
 pub fn replace_operator_input_flags(flags: u32) {
-    let operator_flags = flags & INPUT_COMMAND_MASK;
+    let operator_flags = flags & INPUT_OPERATOR_ACTION_MASK;
     let _ = INPUT_FLAGS.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
         Some((current & !INPUT_COMMAND_MASK) | operator_flags)
     });
@@ -108,7 +109,7 @@ pub fn replace_operator_input_flags(flags: u32) {
 }
 
 pub fn replace_operator_input_flags_and_set_can_link_active(flags: u32) {
-    let operator_flags = flags & INPUT_COMMAND_MASK;
+    let operator_flags = flags & INPUT_OPERATOR_ACTION_MASK;
     let _ = INPUT_FLAGS.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
         Some((current & !INPUT_COMMAND_MASK) | operator_flags | INPUT_CAN_LINK_ACTIVE)
     });
@@ -193,7 +194,8 @@ pub fn resolve_control(
     intent: ControlIntent,
 ) -> ControlDecision {
     let operator_input_available = input_flags & INPUT_CAN_LINK_ACTIVE != 0;
-    let hard_output_inhibited = fault_flags & HARD_OUTPUT_INHIBIT_FAULTS != 0;
+    let servo_fault = fault_flags & SERVO_FAULTS != 0;
+    let hard_output_inhibited = fault_flags & HARD_OUTPUT_INHIBIT_FAULTS != 0 || servo_fault;
     let allow_new_ignition =
         phase == SequencePhase::Idle && operator_input_available && fault_flags == 0;
 
@@ -204,7 +206,11 @@ pub fn resolve_control(
             fill_on: false,
             separate_on: false,
             o2_on: false,
-            servo_action: ServoAction::Hold,
+            servo_action: if servo_fault {
+                ServoAction::Hold
+            } else {
+                ServoAction::MoveTo(MAIN_VALVE_CLOSED_ANGLE_X10)
+            },
             allow_new_ignition: false,
         };
     }
@@ -258,6 +264,12 @@ pub static CURRENT_POSITION: AtomicU16 = AtomicU16::new(SERVO_CENTER_POS);
 
 pub static CONTROL_UPDATE_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 pub static ANGLE_COMMAND_SIGNAL: Signal<CriticalSectionRawMutex, i16> = Signal::new();
+pub static RESET_ACK_EVENT_COUNTER: AtomicU8 = AtomicU8::new(0);
+
+pub fn signal_reset_ack_event() {
+    RESET_ACK_EVENT_COUNTER.fetch_add(1, Ordering::AcqRel);
+    CONTROL_UPDATE_SIGNAL.signal(());
+}
 
 pub static CAN_HEALTH: AtomicU8 = AtomicU8::new(CanHealth::Active as u8);
 pub static CAN_TEC: AtomicU8 = AtomicU8::new(0);
