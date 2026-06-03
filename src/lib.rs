@@ -34,15 +34,13 @@ pub const SERVO_CENTER_POS: u16 = 7500;
 pub const SERVO_MAX_POS: u16 = 11500;
 pub const SERVO_POS_PER_DEGREE: f32 = 29.62963;
 pub const SERVO_POLL_INTERVAL_MS: u64 = 200;
-pub const SERVO_POSITION_TOLERANCE: u16 = 120;
-pub const SERVO_ERROR_LIMIT: u8 = 10;
+pub const SERVO_COMM_ERROR_LIMIT: u8 = 10;
 
 // Latched fault flags. Fault removal is an explicit reset operation, never a side effect of
 // receiving traffic again.
 pub const CAN_PEER_LOST: u8 = 1 << 0;
 pub const CAN_BUS_OFF: u8 = 1 << 1;
 pub const SERVO_COMM_ERROR: u8 = 1 << 2;
-pub const SERVO_POS_ERROR: u8 = 1 << 3;
 // Reserved for an abnormal ignition watchdog fault; normal Firing completion is Timeout.
 pub const IGNITION_TIMEOUT: u8 = 1 << 4;
 pub const POWER_ERROR: u8 = 1 << 5;
@@ -51,7 +49,7 @@ pub const CAN_TX_FRAME_CREATE_FAILED: u8 = 1 << 7;
 pub const CAN_FAULTS: u8 =
     CAN_PEER_LOST | CAN_BUS_OFF | CAN_TX_TIMEOUT | CAN_TX_FRAME_CREATE_FAILED;
 pub const RECOVERABLE_CAN_FAULTS: u8 = CAN_PEER_LOST;
-pub const SERVO_FAULTS: u8 = SERVO_COMM_ERROR | SERVO_POS_ERROR;
+pub const SERVO_FAULTS: u8 = SERVO_COMM_ERROR;
 pub const HARD_OUTPUT_INHIBIT_FAULTS: u8 =
     IGNITION_TIMEOUT | POWER_ERROR | CAN_TX_FRAME_CREATE_FAILED;
 
@@ -195,7 +193,7 @@ pub fn resolve_control(
 ) -> ControlDecision {
     let operator_input_available = input_flags & INPUT_CAN_LINK_ACTIVE != 0;
     let servo_fault = fault_flags & SERVO_FAULTS != 0;
-    let hard_output_inhibited = fault_flags & HARD_OUTPUT_INHIBIT_FAULTS != 0 || servo_fault;
+    let hard_output_inhibited = fault_flags & HARD_OUTPUT_INHIBIT_FAULTS != 0;
     let allow_new_ignition =
         phase == SequencePhase::Idle && operator_input_available && fault_flags == 0;
 
