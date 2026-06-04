@@ -1,5 +1,4 @@
 use core::sync::atomic::Ordering;
-
 use embassy_futures::select::{Either, select};
 use embassy_time::{Duration, Instant, Ticker};
 use esp_hal::gpio::{Input, Output};
