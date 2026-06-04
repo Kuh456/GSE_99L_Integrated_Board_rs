@@ -8,9 +8,15 @@ version      = "0.1.0"
 name = "gse_integrated_board"
 path = "./src/bin/main.rs"
 
-[[bin]]
-name = "servo_test"
-path = "./src/bin/servo_test.rs"
+[features]
+default = []
+hardware-test = []
+
+[[test]]
+name = "servo"
+path = "./tests/servo.rs"
+harness = false
+required-features = ["hardware-test"]
 
 [dependencies]
 esp-hal = { version = "1.1.1", features = ["esp32", "unstable","log-04"] }
