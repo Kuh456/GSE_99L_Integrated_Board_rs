@@ -9,11 +9,11 @@ use esp_hal::{
 };
 
 use crate::{
-    CAN_BUS_OFF, CAN_HEALTH, CAN_PEER_LOST, CAN_REC, CAN_RX_ERROR_COUNT, CAN_STATUS_TX_INTERVAL_MS,
-    CAN_TEC, CAN_TX_ERROR_COUNT, CAN_TX_FRAME_CREATE_FAILED, CAN_TX_TIMEOUT, CAN_TX_TIMEOUT_MS,
-    COMMUNICATION_TIMEOUT_MS, CURRENT_POSITION, FAULT_FLAGS, INPUT_CAN_LINK_ACTIVE,
-    INPUT_DUMP_REQUEST, INPUT_FILL_REQUEST, INPUT_FIRE_REQUEST, INPUT_FLAGS, INPUT_GPIO_STATUS,
-    INPUT_O2_TEST_REQUEST, INPUT_RESET_ACK_REQUEST, INPUT_SEPARATE_REQUEST,
+    CAN_BUS_OFF, CAN_COMM_ACTIVE, CAN_HEALTH, CAN_PEER_LOST, CAN_REC, CAN_RX_ERROR_COUNT,
+    CAN_STATUS_TX_INTERVAL_MS, CAN_TEC, CAN_TX_ERROR_COUNT, CAN_TX_FRAME_CREATE_FAILED,
+    CAN_TX_TIMEOUT, CAN_TX_TIMEOUT_MS, COMMUNICATION_TIMEOUT_MS, CURRENT_POSITION, FAULT_FLAGS,
+    INPUT_CAN_LINK_ACTIVE, INPUT_DUMP_REQUEST, INPUT_FILL_REQUEST, INPUT_FIRE_REQUEST, INPUT_FLAGS,
+    INPUT_GPIO_STATUS, INPUT_O2_TEST_REQUEST, INPUT_RESET_ACK_REQUEST, INPUT_SEPARATE_REQUEST,
     INPUT_VALVE_OPEN_REQUEST, INPUT_VALVE_SET_REQUEST, OUTPUT_STATUS,
     can::{
         health::{CanHealth, classify_can_health},
@@ -153,6 +153,7 @@ fn handle_received_frame(
 
             // A valid fresh command frame makes operator input trustworthy again. Latched CAN
             // fault flags remain for status/reset policy, and the supervisor keeps Abort.
+            CAN_COMM_ACTIVE.store(true, Ordering::Release);
             replace_operator_input_flags_and_set_can_link_active(button_inputs(raw));
 
             if reset_ack_now && !*reset_ack_prev && raw & BUTTON_COMMAND_BITS == 0 {
@@ -390,6 +391,7 @@ fn handle_can_error(error: EspTwaiError, can: &twai::Twai<'static, Async>) {
 }
 
 fn inhibit_can_inputs() {
+    CAN_COMM_ACTIVE.store(false, Ordering::Release);
     if INPUT_FLAGS.load(Ordering::Acquire) & INPUT_CAN_LINK_ACTIVE != 0 {
         update_input_flag(INPUT_CAN_LINK_ACTIVE, false);
     }

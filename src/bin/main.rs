@@ -26,6 +26,7 @@ use gse_integrated_board::{
     tasks::{
         can_communication::can_manager_task,
         servo::servo_task,
+        status_led::status_led_task,
         supervisor::{InputGpioPins, supervisor_task},
     },
 };
@@ -63,8 +64,8 @@ async fn main(spawner: Spawner) -> ! {
     let igniter_power_check_pin = Input::new(peripherals.GPIO34, InputConfig::default());
     let relay_24v_check_pin = Input::new(peripherals.GPIO35, InputConfig::default());
 
-    let _led_sequence_state = Output::new(peripherals.GPIO19, Level::Low, OutputConfig::default());
-    let _led_servo_com_state = Output::new(peripherals.GPIO21, Level::Low, OutputConfig::default());
+    let led_can_com_state = Output::new(peripherals.GPIO19, Level::Low, OutputConfig::default());
+    let led_servo_com_state = Output::new(peripherals.GPIO21, Level::Low, OutputConfig::default());
 
     let uart_config = UartConfig::default()
         .with_baudrate(115_200)
@@ -110,6 +111,7 @@ async fn main(spawner: Spawner) -> ! {
     );
 
     spawner.spawn(servo_task(servo).unwrap());
+    spawner.spawn(status_led_task(led_servo_com_state, led_can_com_state).unwrap());
     spawner.spawn(
         supervisor_task(
             ignition,

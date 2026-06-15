@@ -4,9 +4,9 @@ use embassy_futures::select::{Either, select};
 use embassy_time::{Duration, Timer};
 
 use crate::{
-    ANGLE_COMMAND_SIGNAL, CURRENT_POSITION, FAULT_FLAGS, SERVO_COMM_ERROR, SERVO_COMM_ERROR_LIMIT,
-    SERVO_CONTROL_MODE, SERVO_FAULTS, SERVO_MODE_COMMAND, SERVO_POLL_INTERVAL_MS,
-    angle_x10_to_position, krs_servo::IcsDevice, set_fault_flags,
+    ANGLE_COMMAND_SIGNAL, CURRENT_POSITION, FAULT_FLAGS, SERVO_COMM_ACTIVE, SERVO_COMM_ERROR,
+    SERVO_COMM_ERROR_LIMIT, SERVO_CONTROL_MODE, SERVO_FAULTS, SERVO_MODE_COMMAND,
+    SERVO_POLL_INTERVAL_MS, angle_x10_to_position, krs_servo::IcsDevice, set_fault_flags,
 };
 
 #[embassy_executor::task]
@@ -14,11 +14,6 @@ pub async fn servo_task(mut krs: IcsDevice<'static>) {
     let mut communication_error_count = 0u8;
 
     loop {
-        if SERVO_CONTROL_MODE.load(Ordering::Acquire) != SERVO_MODE_COMMAND {
-            Timer::after(Duration::from_millis(SERVO_POLL_INTERVAL_MS)).await;
-            continue;
-        }
-
         let (result, retry_angle) = match select(
             ANGLE_COMMAND_SIGNAL.wait(),
             Timer::after(Duration::from_millis(SERVO_POLL_INTERVAL_MS)),
@@ -39,9 +34,11 @@ pub async fn servo_task(mut krs: IcsDevice<'static>) {
         match result {
             Ok(current_position) => {
                 CURRENT_POSITION.store(current_position, Ordering::Release);
+                SERVO_COMM_ACTIVE.store(true, Ordering::Release);
                 communication_error_count = 0;
             }
             Err(_) => {
+                SERVO_COMM_ACTIVE.store(false, Ordering::Release);
                 communication_error_count = communication_error_count.saturating_add(1);
                 if communication_error_count > SERVO_COMM_ERROR_LIMIT {
                     set_fault_flags(SERVO_COMM_ERROR);

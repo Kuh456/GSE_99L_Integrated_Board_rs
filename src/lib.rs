@@ -4,7 +4,7 @@ pub mod can;
 pub mod krs_servo;
 pub mod tasks;
 
-use core::sync::atomic::{AtomicI16, AtomicU8, AtomicU16, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI16, AtomicU8, AtomicU16, AtomicU32, Ordering};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
 
 pub use can::health::CanHealth;
@@ -259,6 +259,8 @@ pub const SERVO_MODE_COMMAND: u8 = 1;
 pub static SERVO_CONTROL_MODE: AtomicU8 = AtomicU8::new(SERVO_MODE_HOLD);
 pub static SERVO_TARGET_ANGLE_X10: AtomicI16 = AtomicI16::new(MAIN_VALVE_CLOSED_ANGLE_X10);
 pub static CURRENT_POSITION: AtomicU16 = AtomicU16::new(SERVO_CENTER_POS);
+pub static SERVO_COMM_ACTIVE: AtomicBool = AtomicBool::new(false);
+pub static CAN_COMM_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 pub static CONTROL_UPDATE_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 pub static ANGLE_COMMAND_SIGNAL: Signal<CriticalSectionRawMutex, i16> = Signal::new();
