@@ -20,7 +20,11 @@ use esp_hal::{
     twai::{self, BaudRate, TwaiMode, filter::SingleStandardFilter},
     uart::{Config as UartConfig, DataBits, Parity, StopBits, Uart},
 };
+#[cfg(feature = "can-debug-log")]
+use esp_println::println;
 use esp_rtos::embassy::Executor;
+#[cfg(feature = "can-debug-log")]
+use gse_integrated_board::tasks::can_debug::can_debug_log_task;
 use gse_integrated_board::{
     krs_servo::IcsDevice,
     tasks::{
@@ -38,6 +42,8 @@ esp_bootloader_esp_idf::esp_app_desc!();
 async fn main(spawner: Spawner) -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
+    #[cfg(feature = "can-debug-log")]
+    println!("boot can-debug-log enabled");
     esp_alloc::heap_allocator!(size: 32 * 1024);
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_int = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
@@ -106,6 +112,12 @@ async fn main(spawner: Spawner) -> ! {
                 );
                 let can = can_config.start();
                 spawner.spawn(can_manager_task(can).unwrap());
+                #[cfg(feature = "can-debug-log")]
+                {
+                    println!("boot spawning can_debug_log_task on second core");
+                    spawner.spawn(can_debug_log_task().unwrap());
+                    println!("boot spawned can_debug_log_task on second core");
+                }
             });
         },
     );

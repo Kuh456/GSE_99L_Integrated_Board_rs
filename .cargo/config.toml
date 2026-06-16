@@ -1,5 +1,5 @@
 [target.xtensa-esp32-none-elf]
-runner = "espflash flash --monitor --chip esp32 --baud 2000000"
+runner = "espflash flash --monitor --chip esp32 --baud 2000000 --monitor-baud 115200 --log-format serial"
 
 [env]
 ESP_LOG="info"

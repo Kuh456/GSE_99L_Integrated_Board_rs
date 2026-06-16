@@ -10,6 +10,7 @@ path = "./src/bin/main.rs"
 
 [features]
 default = []
+can-debug-log = []
 hardware-test = []
 
 [[test]]
