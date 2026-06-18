@@ -22,13 +22,15 @@ use crate::{
     },
     clear_fault_flags_for_reset, position_to_angle_x10, replace_operator_input_flags,
     replace_operator_input_flags_and_set_can_link_active, sequence_phase, set_fault_flags,
-    signal_reset_ack_event, update_input_flag,
+    signal_reset_ack_event,
+    tasks::espnow::latest_log_data,
+    update_input_flag,
 };
 
 const CAN_HEALTH_MONITOR_INTERVAL_MS: u64 = 100;
 const BUTTON_RESET_ACK_BIT: u8 = 1 << 7;
 const BUTTON_COMMAND_BITS: u8 = BUTTON_RESET_ACK_BIT - 1;
-const STATUS_FRAME_COUNT: u8 = 4;
+const STATUS_FRAME_COUNT: u8 = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CanTxRuntimeState {
@@ -262,7 +264,18 @@ async fn transmit_status_frame(
         2 => GseCanMessage::MainValveAngleToCtrlPanel {
             angle_x10: position_to_angle_x10(CURRENT_POSITION.load(Ordering::Acquire)),
         },
-        _ => internal_status_message(),
+        3 => internal_status_message(),
+        _ => {
+            let Some(log_data) = latest_log_data() else {
+                return Ok(());
+            };
+            GseCanMessage::LoggerData {
+                adc0: log_data.adc0,
+                adc2: log_data.adc2,
+                adc3: log_data.adc3,
+                counter: log_data.counter,
+            }
+        }
     };
 
     transmit(can, msg, can_tx_allowed(CanTxRuntimeState::Normal, false)).await

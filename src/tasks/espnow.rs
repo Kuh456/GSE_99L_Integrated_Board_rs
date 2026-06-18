@@ -17,6 +17,7 @@ pub struct LogData {
     pub adc0: u16,
     pub adc2: u16,
     pub adc3: u16,
+    pub counter: u16,
 }
 
 impl LogData {
@@ -37,6 +38,7 @@ impl LogData {
             adc0,
             adc2,
             adc3,
+            counter: 0,
         })
     }
 }
@@ -57,7 +59,7 @@ pub async fn espnow_receive_task(
         let packet = esp_now.receive_async().await;
         let payload = packet.data();
 
-        let Some(log_data) = LogData::parse(payload) else {
+        let Some(mut log_data) = LogData::parse(payload) else {
             println!(
                 "[ESP-NOW] warn invalid payload length: {} bytes, expected {} bytes",
                 payload.len(),
@@ -67,10 +69,13 @@ pub async fn espnow_receive_task(
         };
 
         LATEST_LOG_DATA.lock(|latest| {
+            log_data.counter = latest
+                .borrow()
+                .map_or(1, |latest| latest.counter.wrapping_add(1));
             *latest.borrow_mut() = Some(log_data);
         });
 
-        let mac = packet.info.src_address;
+        let _mac = packet.info.src_address;
         // println!(
         //     "[ESP-NOW] recv from {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         //     mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
