@@ -3,6 +3,7 @@ pub const CAN_ID_MAIN_VALVE_ANGLE_TO_CTRL_PANEL: u16 = 0x101;
 pub const CAN_ID_OUTPUT_GPIO_STATUS: u16 = 0x103;
 pub const CAN_ID_INPUT_GPIO_STATUS: u16 = 0x104;
 pub const CAN_ID_INTERNAL_STATUS: u16 = 0x105;
+pub const CAN_ID_LOGGER_DATA: u16 = 0x106;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GseCanMessage {

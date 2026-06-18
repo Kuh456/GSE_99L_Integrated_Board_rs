@@ -15,6 +15,7 @@ use esp_hal::{
     clock::CpuClock,
     gpio::{Input, InputConfig, Level, Output, OutputConfig},
     interrupt::software::SoftwareInterruptControl,
+    ram,
     system::Stack,
     timer::timg::TimerGroup,
     twai::{self, BaudRate, TwaiMode, filter::SingleStandardFilter},
@@ -29,6 +30,7 @@ use gse_integrated_board::{
     krs_servo::IcsDevice,
     tasks::{
         can_communication::can_manager_task,
+        espnow::{espnow_receive_task, initialize_espnow},
         servo::servo_task,
         status_led::status_led_task,
         supervisor::{InputGpioPins, supervisor_task},
@@ -44,7 +46,8 @@ async fn main(spawner: Spawner) -> ! {
     let peripherals = esp_hal::init(config);
     #[cfg(feature = "can-debug-log")]
     println!("boot can-debug-log enabled");
-    esp_alloc::heap_allocator!(size: 32 * 1024);
+    esp_alloc::heap_allocator!(#[ram(reclaimed)] size: 64 * 1024);
+    esp_alloc::heap_allocator!(size: 36 * 1024);
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_int = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);
@@ -83,6 +86,7 @@ async fn main(spawner: Spawner) -> ! {
         .with_rx(servo_rx)
         .with_tx(servo_tx);
     let servo = IcsDevice::new(uart, servo_enable);
+    let (wifi_controller, esp_now) = initialize_espnow(peripherals.WIFI);
 
     esp_rtos::start_second_core(
         peripherals.CPU_CTRL,
@@ -122,6 +126,7 @@ async fn main(spawner: Spawner) -> ! {
         },
     );
 
+    spawner.spawn(espnow_receive_task(wifi_controller, esp_now).unwrap());
     spawner.spawn(servo_task(servo).unwrap());
     spawner.spawn(status_led_task(led_servo_com_state, led_can_com_state).unwrap());
     spawner.spawn(
