@@ -90,28 +90,43 @@ pub const INPUT_COMMAND_MASK: u32 = INPUT_OPERATOR_ACTION_MASK | INPUT_RESET_ACK
 pub static INPUT_FLAGS: AtomicU32 = AtomicU32::new(0);
 
 pub fn update_input_flag(flag: u32, asserted: bool) {
-    if asserted {
-        INPUT_FLAGS.fetch_or(flag, Ordering::AcqRel);
+    let previous = if asserted {
+        INPUT_FLAGS.fetch_or(flag, Ordering::AcqRel)
     } else {
-        INPUT_FLAGS.fetch_and(!flag, Ordering::AcqRel);
+        INPUT_FLAGS.fetch_and(!flag, Ordering::AcqRel)
+    };
+    let current = if asserted {
+        previous | flag
+    } else {
+        previous & !flag
+    };
+    if previous != current {
+        CONTROL_UPDATE_SIGNAL.signal(());
     }
-    CONTROL_UPDATE_SIGNAL.signal(());
 }
 
 pub fn replace_operator_input_flags(flags: u32) {
     let operator_flags = flags & INPUT_OPERATOR_ACTION_MASK;
-    let _ = INPUT_FLAGS.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+    if let Ok(previous) = INPUT_FLAGS.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
         Some((current & !INPUT_COMMAND_MASK) | operator_flags)
-    });
-    CONTROL_UPDATE_SIGNAL.signal(());
+    }) {
+        let current = (previous & !INPUT_COMMAND_MASK) | operator_flags;
+        if previous != current {
+            CONTROL_UPDATE_SIGNAL.signal(());
+        }
+    }
 }
 
 pub fn replace_operator_input_flags_and_set_can_link_active(flags: u32) {
     let operator_flags = flags & INPUT_OPERATOR_ACTION_MASK;
-    let _ = INPUT_FLAGS.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+    if let Ok(previous) = INPUT_FLAGS.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
         Some((current & !INPUT_COMMAND_MASK) | operator_flags | INPUT_CAN_LINK_ACTIVE)
-    });
-    CONTROL_UPDATE_SIGNAL.signal(());
+    }) {
+        let current = (previous & !INPUT_COMMAND_MASK) | operator_flags | INPUT_CAN_LINK_ACTIVE;
+        if previous != current {
+            CONTROL_UPDATE_SIGNAL.signal(());
+        }
+    }
 }
 
 #[repr(u8)]

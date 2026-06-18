@@ -118,7 +118,7 @@ async fn run_servo_test(krs: &mut IcsDevice<'_>) -> Result<ServoTestSummary, Ser
     let open_position = angle_x10_to_position(MAIN_VALVE_OPEN_ANGLE_X10);
 
     println!("stage=get_id ...");
-    let detected_id = krs.get_id().map_err(|source| ServoTestError::GetIdFailed {
+    let detected_id = krs.get_id().await.map_err(|source| ServoTestError::GetIdFailed {
         stage: "get_id",
         source,
     })?;
@@ -127,6 +127,7 @@ async fn run_servo_test(krs: &mut IcsDevice<'_>) -> Result<ServoTestSummary, Ser
     println!("stage=get_pos ...");
     let initial_position =
         krs.get_pos(SERVO_TEST_ID)
+            .await
             .map_err(|source| ServoTestError::GetPosFailed {
                 stage: "get_pos_initial",
                 source,
@@ -140,6 +141,7 @@ async fn run_servo_test(krs: &mut IcsDevice<'_>) -> Result<ServoTestSummary, Ser
     println!("closed_position={}", closed_position);
     let closed_return = krs
         .set_pos(SERVO_TEST_ID, closed_position)
+        .await
         .map_err(|source| ServoTestError::MoveClosedFailed {
             stage: "move_closed",
             target_position: closed_position,
@@ -156,7 +158,7 @@ async fn run_servo_test(krs: &mut IcsDevice<'_>) -> Result<ServoTestSummary, Ser
     println!("stage=move_open ...");
     println!("open_angle_x10={}", MAIN_VALVE_OPEN_ANGLE_X10);
     println!("open_position={}", open_position);
-    match krs.set_pos(SERVO_TEST_ID, open_position) {
+    match krs.set_pos(SERVO_TEST_ID, open_position).await {
         Ok(open_return) => {
             println!(
                 "stage=move_open returned_position={} returned_angle_x10={}",
@@ -166,7 +168,7 @@ async fn run_servo_test(krs: &mut IcsDevice<'_>) -> Result<ServoTestSummary, Ser
         }
         Err(source) => {
             println!("stage=move_open_failed_return_closed ...");
-            if let Err(return_source) = krs.set_pos(SERVO_TEST_ID, closed_position) {
+            if let Err(return_source) = krs.set_pos(SERVO_TEST_ID, closed_position).await {
                 println!(
                     "stage=move_open_failed_return_closed_failed source={:?}",
                     return_source
@@ -185,6 +187,7 @@ async fn run_servo_test(krs: &mut IcsDevice<'_>) -> Result<ServoTestSummary, Ser
     println!("stage=return_closed ...");
     let return_closed = krs
         .set_pos(SERVO_TEST_ID, closed_position)
+        .await
         .map_err(|source| ServoTestError::ReturnClosedFailed {
             stage: "return_closed",
             target_position: closed_position,
@@ -200,6 +203,7 @@ async fn run_servo_test(krs: &mut IcsDevice<'_>) -> Result<ServoTestSummary, Ser
     println!("stage=get_pos_final ...");
     let final_position =
         krs.get_pos(SERVO_TEST_ID)
+            .await
             .map_err(|source| ServoTestError::GetPosFailed {
                 stage: "get_pos_final",
                 source,

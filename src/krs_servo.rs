@@ -1,4 +1,5 @@
 use crate::{SERVO_MAX_POS, SERVO_MIN_POS};
+use embassy_time::Timer;
 use esp_hal::{
     Blocking,
     gpio::Output,
@@ -92,7 +93,7 @@ impl<'d> IcsDevice<'d> {
         Ok(())
     }
 
-    fn read_expected_timeout(&mut self, data: &mut [u8]) -> Result<(), IcsError> {
+    async fn read_expected_timeout(&mut self, data: &mut [u8]) -> Result<(), IcsError> {
         let expected = data.len();
         let mut read_count = 0usize;
         let start = Instant::now();
@@ -129,7 +130,7 @@ impl<'d> IcsDevice<'d> {
                 return Err(IcsError::TimeoutError);
             }
 
-            ets_delay_us(RX_POLL_INTERVAL_US);
+            Timer::after_micros(RX_POLL_INTERVAL_US as u64).await;
         }
 
         Ok(())
@@ -137,7 +138,7 @@ impl<'d> IcsDevice<'d> {
 
     // 通信部分（private)
     // 内部で ENピン操作 -> 送信 -> 受信 を行う
-    fn transfer(&mut self, tx: &[u8], rx: &mut [u8]) -> Result<(), IcsError> {
+    async fn transfer(&mut self, tx: &[u8], rx: &mut [u8]) -> Result<(), IcsError> {
         // Arduino版 synchronize() と同じく、送信前にUARTを待機状態へそろえる。
         self.uart
             .flush()
@@ -170,7 +171,7 @@ impl<'d> IcsDevice<'d> {
         // 受信モードへ切り替える。
         self.en_pin.set_low();
 
-        self.read_expected_timeout(rx)
+        self.read_expected_timeout(rx).await
     }
     // ---  補助関数 (private) ---
 
@@ -193,7 +194,7 @@ impl<'d> IcsDevice<'d> {
 
     // --- コマンド実装 ---
     // サーボ角度セット
-    pub fn set_pos(&mut self, id: u8, pos: u16) -> Result<u16, IcsError> {
+    pub async fn set_pos(&mut self, id: u8, pos: u16) -> Result<u16, IcsError> {
         // IDと範囲のチェック
         let valid_id = Self::check_id(id)?;
         let valid_pos = Self::clip_pos(pos)?;
@@ -211,7 +212,7 @@ impl<'d> IcsDevice<'d> {
         let mut rx_cmd = [0u8; 3]; // 受信バッファ
 
         // 送受信
-        self.transfer(&tx_cmd, &mut rx_cmd)?;
+        self.transfer(&tx_cmd, &mut rx_cmd).await?;
 
         // 受信データから現在位置を復元
         // ((rx[1] << 7) & 0x3F80) + (rx[2] & 0x7F)
@@ -220,7 +221,7 @@ impl<'d> IcsDevice<'d> {
     }
 
     // サーボをフリー状態にする
-    pub fn set_free(&mut self, id: u8) -> Result<u16, IcsError> {
+    pub async fn set_free(&mut self, id: u8) -> Result<u16, IcsError> {
         let valid_id = Self::check_id(id)?;
 
         let tx_cmd = [
@@ -230,19 +231,19 @@ impl<'d> IcsDevice<'d> {
         ];
         let mut rx_cmd = [0u8; 3];
 
-        self.transfer(&tx_cmd, &mut rx_cmd)?;
+        self.transfer(&tx_cmd, &mut rx_cmd).await?;
 
         let re_pos = ((rx_cmd[1] as u16) << 7) & 0x3F80 | (rx_cmd[2] as u16) & 0x007F;
         Ok(re_pos)
     }
 
     // IDを取得する
-    pub fn get_id(&mut self) -> Result<u8, IcsError> {
+    pub async fn get_id(&mut self) -> Result<u8, IcsError> {
         let tx_cmd = [0xFF, 0x00, 0x00, 0x00];
         let mut rx_cmd = [0u8; 1];
 
         // 送受信
-        self.transfer(&tx_cmd, &mut rx_cmd)?;
+        self.transfer(&tx_cmd, &mut rx_cmd).await?;
 
         ets_delay_us(520_000);
         // マスク処理
@@ -251,7 +252,7 @@ impl<'d> IcsDevice<'d> {
     }
 
     // スピードを取得する
-    pub fn get_spd(&mut self, id: u8) -> Result<u8, IcsError> {
+    pub async fn get_spd(&mut self, id: u8) -> Result<u8, IcsError> {
         let valid_id = Self::check_id(id)?;
         let tx_cmd = [
             0xA0 + valid_id, // CMD
@@ -260,13 +261,13 @@ impl<'d> IcsDevice<'d> {
         let mut rx_cmd = [0u8; 3];
 
         // 送受信
-        self.transfer(&tx_cmd, &mut rx_cmd)?;
+        self.transfer(&tx_cmd, &mut rx_cmd).await?;
         let speed = rx_cmd[2];
         Ok(speed)
     }
 
     // 現在のサーボ角度を取得 ※ICS3.6以降で有効
-    pub fn get_pos(&mut self, id: u8) -> Result<u16, IcsError> {
+    pub async fn get_pos(&mut self, id: u8) -> Result<u16, IcsError> {
         let valid_id = Self::check_id(id)?;
 
         let tx_cmd = [
@@ -275,7 +276,7 @@ impl<'d> IcsDevice<'d> {
         ];
         let mut rx_cmd = [0u8; 4];
 
-        self.transfer(&tx_cmd, &mut rx_cmd)?;
+        self.transfer(&tx_cmd, &mut rx_cmd).await?;
 
         let read_pos = ((rx_cmd[2] as u16) << 7) & 0x3F80 | (rx_cmd[3] as u16) & 0x007F;
         Ok(read_pos)
