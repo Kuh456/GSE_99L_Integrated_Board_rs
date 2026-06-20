@@ -15,6 +15,7 @@ use crate::{
     INPUT_CAN_LINK_ACTIVE, INPUT_DUMP_REQUEST, INPUT_FILL_REQUEST, INPUT_FIRE_REQUEST, INPUT_FLAGS,
     INPUT_GPIO_STATUS, INPUT_O2_TEST_REQUEST, INPUT_RESET_ACK_REQUEST, INPUT_SEPARATE_REQUEST,
     INPUT_VALVE_OPEN_REQUEST, INPUT_VALVE_SET_REQUEST, OUTPUT_STATUS,
+    SERVO_COMM_ACTIVE, SERVO_COMM_ERROR,
     can::{
         health::{CanHealth, classify_can_health},
         protocol::{CAN_ID_BUTTON_FROM_CTRL_PANEL, CanDecodeError, GseCanMessage},
@@ -291,9 +292,14 @@ async fn transmit_probe(can: &mut twai::Twai<'static, Async>) -> Result<(), CanT
 }
 
 fn internal_status_message() -> GseCanMessage {
+    let mut flags = FAULT_FLAGS.load(Ordering::Acquire);
+    if !SERVO_COMM_ACTIVE.load(Ordering::Acquire) {
+        flags |= SERVO_COMM_ERROR;
+    }
+
     GseCanMessage::InternalStatus {
         phase: sequence_phase() as u8,
-        flags: FAULT_FLAGS.load(Ordering::Acquire),
+        flags,
     }
 }
 

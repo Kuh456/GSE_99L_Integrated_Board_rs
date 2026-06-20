@@ -68,10 +68,10 @@ async fn main(spawner: Spawner) -> ! {
     let servo_rx = Input::new(peripherals.GPIO14, InputConfig::default());
     let servo_enable = Output::new(peripherals.GPIO27, Level::Low, OutputConfig::default());
 
-    let solenoid_power_check_pin = Input::new(peripherals.GPIO23, InputConfig::default());
-    let relay_12v_check_pin = Input::new(peripherals.GPIO22, InputConfig::default());
-    let igniter_power_check_pin = Input::new(peripherals.GPIO34, InputConfig::default());
-    let relay_24v_check_pin = Input::new(peripherals.GPIO35, InputConfig::default());
+    let solenoid_power_check_pin = Input::new(peripherals.GPIO34, InputConfig::default());
+    let relay_12v_check_pin = Input::new(peripherals.GPIO35, InputConfig::default());
+    let igniter_power_check_pin = Input::new(peripherals.GPIO23, InputConfig::default());
+    let relay_24v_check_pin = Input::new(peripherals.GPIO22, InputConfig::default());
 
     let led_can_com_state = Output::new(peripherals.GPIO19, Level::Low, OutputConfig::default());
     let led_servo_com_state = Output::new(peripherals.GPIO21, Level::Low, OutputConfig::default());
