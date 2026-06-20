@@ -2,6 +2,7 @@
 
 pub mod can;
 pub mod krs_servo;
+mod servo_control;
 pub mod tasks;
 
 use core::sync::atomic::{AtomicBool, AtomicI16, AtomicU8, AtomicU16, AtomicU32, Ordering};
@@ -21,6 +22,7 @@ pub const SUPERVISOR_INTERVAL_MS: u64 = 10;
 // Sequence timing.
 pub const IGNITION_WAIT_MS: u64 = 10000;
 pub const MAIN_VALVE_OPEN_DELAY_MS: u64 = 3000;
+pub const O2_OFF_DELAY_AFTER_VALVE_OPEN_MS: u64 = 2000;
 pub const IGNITION_SEQUENCE_TIMEOUT_MS: u64 = 10000;
 pub const RUNNING_DURATION_MS: u64 = IGNITION_SEQUENCE_TIMEOUT_MS;
 pub const FIRING_TOTAL_TIMEOUT_MS: u64 =
@@ -34,7 +36,10 @@ pub const SERVO_CENTER_POS: u16 = 7500;
 pub const SERVO_MAX_POS: u16 = 11500;
 pub const SERVO_POS_PER_DEGREE: f32 = 29.62963;
 pub const SERVO_POLL_INTERVAL_MS: u64 = 200;
+pub const SERVO_GET_POS_INTERVAL_MS: u64 = 200;
 pub const SERVO_COMM_ERROR_LIMIT: u8 = 10;
+pub const FIRING_OPEN_SEND_MAX: u8 = 10;
+pub const OPEN_LATCH_RELEASE_DELAY_MS: u64 = 10_000;
 
 // Latched fault flags. Fault removal is an explicit reset operation, never a side effect of
 // receiving traffic again.
@@ -207,7 +212,6 @@ pub fn resolve_control(
     intent: ControlIntent,
 ) -> ControlDecision {
     let operator_input_available = input_flags & INPUT_CAN_LINK_ACTIVE != 0;
-    let servo_fault = fault_flags & SERVO_FAULTS != 0;
     let hard_output_inhibited = fault_flags & HARD_OUTPUT_INHIBIT_FAULTS != 0;
     let allow_new_ignition =
         phase == SequencePhase::Idle && operator_input_available && fault_flags == 0;
@@ -219,11 +223,7 @@ pub fn resolve_control(
             fill_on: false,
             separate_on: false,
             o2_on: false,
-            servo_action: if servo_fault {
-                ServoAction::Hold
-            } else {
-                ServoAction::MoveTo(MAIN_VALVE_CLOSED_ANGLE_X10)
-            },
+            servo_action: ServoAction::Hold,
             allow_new_ignition: false,
         };
     }
@@ -275,6 +275,10 @@ pub static SERVO_CONTROL_MODE: AtomicU8 = AtomicU8::new(SERVO_MODE_HOLD);
 pub static SERVO_TARGET_ANGLE_X10: AtomicI16 = AtomicI16::new(MAIN_VALVE_CLOSED_ANGLE_X10);
 pub static CURRENT_POSITION: AtomicU16 = AtomicU16::new(SERVO_CENTER_POS);
 pub static SERVO_COMM_ACTIVE: AtomicBool = AtomicBool::new(false);
+pub(crate) static SERVO_COMM_ERROR_COUNT: AtomicU8 = AtomicU8::new(0);
+pub(crate) static FIRING_OPEN_LATCHED: AtomicBool = AtomicBool::new(false);
+pub(crate) static FIRING_OPEN_SEND_COUNT: AtomicU8 = AtomicU8::new(0);
+pub(crate) static OPEN_LATCH_RELEASE_PENDING: AtomicBool = AtomicBool::new(false);
 pub static CAN_COMM_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 pub static CONTROL_UPDATE_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();

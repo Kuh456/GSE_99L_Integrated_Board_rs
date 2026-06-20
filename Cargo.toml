@@ -11,6 +11,7 @@ path = "./src/bin/main.rs"
 [features]
 default = []
 can-debug-log = []
+servo-debug-log = []
 hardware-test = []
 
 [[test]]

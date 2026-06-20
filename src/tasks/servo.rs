@@ -1,19 +1,42 @@
 use core::sync::atomic::Ordering;
 
 use embassy_futures::select::{Either, select};
+#[cfg(feature = "servo-debug-log")]
+use embassy_time::Instant;
 use embassy_time::{Duration, Timer};
+#[cfg(feature = "servo-debug-log")]
+use esp_println::println;
 
+#[cfg(feature = "servo-debug-log")]
+use crate::SERVO_COMM_ERROR_LIMIT;
 use crate::{
-    ANGLE_COMMAND_SIGNAL, CURRENT_POSITION, SERVO_COMM_ACTIVE, SERVO_CONTROL_MODE,
-    SERVO_MODE_COMMAND, SERVO_POLL_INTERVAL_MS, angle_x10_to_position, krs_servo::IcsDevice,
+    ANGLE_COMMAND_SIGNAL, CURRENT_POSITION, SERVO_COMM_ACTIVE, SERVO_COMM_ERROR_COUNT,
+    SERVO_CONTROL_MODE, SERVO_GET_POS_INTERVAL_MS, SERVO_MODE_COMMAND, angle_x10_to_position,
+    krs_servo::{IcsDevice, IcsError},
 };
+
+#[derive(Clone, Copy)]
+enum ServoOperation {
+    SetPosition,
+    GetPosition,
+}
+
+#[cfg(feature = "servo-debug-log")]
+impl ServoOperation {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::SetPosition => "set_pos",
+            Self::GetPosition => "get_pos",
+        }
+    }
+}
 
 #[embassy_executor::task]
 pub async fn servo_task(mut krs: IcsDevice<'static>) {
     loop {
-        let result = match select(
+        let (result, operation) = match select(
             ANGLE_COMMAND_SIGNAL.wait(),
-            Timer::after(Duration::from_millis(SERVO_POLL_INTERVAL_MS)),
+            Timer::after(Duration::from_millis(SERVO_GET_POS_INTERVAL_MS)),
         )
         .await
         {
@@ -23,19 +46,68 @@ pub async fn servo_task(mut krs: IcsDevice<'static>) {
                 }
 
                 let target_position = angle_x10_to_position(angle_x10);
-                krs.set_pos(0, target_position).await
+                (
+                    krs.set_pos(0, target_position).await,
+                    ServoOperation::SetPosition,
+                )
             }
-            Either::Second(()) => krs.get_pos(0).await,
+            Either::Second(()) => (krs.get_pos(0).await, ServoOperation::GetPosition),
         };
 
         match result {
             Ok(current_position) => {
                 CURRENT_POSITION.store(current_position, Ordering::Release);
+                let previous_error_count = SERVO_COMM_ERROR_COUNT.swap(0, Ordering::AcqRel);
                 SERVO_COMM_ACTIVE.store(true, Ordering::Release);
+                log_servo_comm_recovered(operation, previous_error_count);
             }
-            Err(_) => {
+            Err(error) => {
+                let previous_error_count = SERVO_COMM_ERROR_COUNT
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                        Some(count.saturating_add(1))
+                    })
+                    .unwrap_or_else(|count| count);
+                let error_count = previous_error_count.saturating_add(1);
                 SERVO_COMM_ACTIVE.store(false, Ordering::Release);
+                log_servo_comm_error(operation, &error, error_count);
             }
         }
     }
 }
+
+#[cfg(feature = "servo-debug-log")]
+fn log_servo_comm_error(operation: ServoOperation, error: &IcsError, error_count: u8) {
+    let event = if error_count == SERVO_COMM_ERROR_LIMIT {
+        "fault_raised"
+    } else {
+        "comm_error"
+    };
+    println!(
+        "servo_dbg event={} operation={} at_ms={} consecutive_error_count={} fault_active={} error={:?}",
+        event,
+        operation.name(),
+        Instant::now().as_millis(),
+        error_count,
+        error_count >= SERVO_COMM_ERROR_LIMIT,
+        error,
+    );
+}
+
+#[cfg(not(feature = "servo-debug-log"))]
+fn log_servo_comm_error(_operation: ServoOperation, _error: &IcsError, _error_count: u8) {}
+
+#[cfg(feature = "servo-debug-log")]
+fn log_servo_comm_recovered(operation: ServoOperation, previous_error_count: u8) {
+    if previous_error_count == 0 {
+        return;
+    }
+    println!(
+        "servo_dbg event=recovered operation={} at_ms={} previous_consecutive_error_count={}",
+        operation.name(),
+        Instant::now().as_millis(),
+        previous_error_count,
+    );
+}
+
+#[cfg(not(feature = "servo-debug-log"))]
+fn log_servo_comm_recovered(_operation: ServoOperation, _previous_error_count: u8) {}

@@ -10,7 +10,7 @@ use esp_hal::{
 use esp_println::println;
 // --- 定数定義  ---
 const MAX_ID: u8 = 31;
-const TIMEOUT_MS: u64 = 50;
+const TIMEOUT_MS: u64 = 100;
 
 const RX_POLL_INTERVAL_US: u32 = 100;
 

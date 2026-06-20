@@ -2,18 +2,23 @@ use core::sync::atomic::Ordering;
 use embassy_futures::select::{Either, select};
 use embassy_time::{Duration, Instant, Ticker};
 use esp_hal::gpio::{Input, Output};
+#[cfg(feature = "can-debug-log")]
+use esp_println::println;
 
 use crate::{
     ANGLE_COMMAND_SIGNAL, CAN_FAULTS, CONTROL_UPDATE_SIGNAL, ControlDecision, ControlIntent,
-    FAULT_FLAGS, FIRING_TOTAL_TIMEOUT_MS, IGNITION_WAIT_MS, IN_IGNITER_POWER_PRESENT,
-    IN_RELAY_12V_ON, IN_RELAY_24V_ON, IN_SOLENOID_POWER_PRESENT, INPUT_CAN_LINK_ACTIVE,
-    INPUT_DUMP_REQUEST, INPUT_FILL_REQUEST, INPUT_FIRE_REQUEST, INPUT_FLAGS, INPUT_GPIO_STATUS,
-    INPUT_O2_TEST_REQUEST, INPUT_OPERATOR_ACTION_MASK, INPUT_SEPARATE_REQUEST,
-    INPUT_VALVE_OPEN_REQUEST, INPUT_VALVE_SET_REQUEST, MAIN_VALVE_CLOSED_ANGLE_X10,
-    MAIN_VALVE_OPEN_ANGLE_X10, MAIN_VALVE_OPEN_DELAY_MS, OUT_DUMP, OUT_FILL, OUT_IGNITER, OUT_O2,
-    OUT_SEPARATE, OUTPUT_STATUS, RESET_ACK_EVENT_COUNTER, SERVO_CONTROL_MODE, SERVO_FAULTS,
-    SERVO_MODE_COMMAND, SERVO_MODE_HOLD, SERVO_TARGET_ANGLE_X10, SUPERVISOR_INTERVAL_MS,
+    FAULT_FLAGS, FIRING_OPEN_LATCHED, FIRING_OPEN_SEND_COUNT, FIRING_OPEN_SEND_MAX,
+    FIRING_TOTAL_TIMEOUT_MS, IGNITION_WAIT_MS, IN_IGNITER_POWER_PRESENT, IN_RELAY_12V_ON,
+    IN_RELAY_24V_ON, IN_SOLENOID_POWER_PRESENT, INPUT_CAN_LINK_ACTIVE, INPUT_DUMP_REQUEST,
+    INPUT_FILL_REQUEST, INPUT_FIRE_REQUEST, INPUT_FLAGS, INPUT_GPIO_STATUS, INPUT_O2_TEST_REQUEST,
+    INPUT_OPERATOR_ACTION_MASK, INPUT_SEPARATE_REQUEST, INPUT_VALVE_OPEN_REQUEST,
+    INPUT_VALVE_SET_REQUEST, MAIN_VALVE_CLOSED_ANGLE_X10, MAIN_VALVE_OPEN_ANGLE_X10,
+    MAIN_VALVE_OPEN_DELAY_MS, O2_OFF_DELAY_AFTER_VALVE_OPEN_MS, OPEN_LATCH_RELEASE_DELAY_MS,
+    OPEN_LATCH_RELEASE_PENDING, OUT_DUMP, OUT_FILL, OUT_IGNITER, OUT_O2, OUT_SEPARATE,
+    OUTPUT_STATUS, RESET_ACK_EVENT_COUNTER, SERVO_CONTROL_MODE, SERVO_MODE_COMMAND,
+    SERVO_MODE_HOLD, SERVO_POLL_INTERVAL_MS, SERVO_TARGET_ANGLE_X10, SUPERVISOR_INTERVAL_MS,
     SequencePhase, ServoAction, replace_operator_input_flags, resolve_control, sequence_phase,
+    servo_control::{RequestedServoAction, ServoCommandState, ServoDispatch, ServoPhase},
     set_sequence_phase,
 };
 
@@ -70,7 +75,8 @@ pub async fn supervisor_task(
     let mut firing_started_at: Option<Instant> = None;
     let mut abort_before_firing = false;
     let mut previous_reset_ack_event = RESET_ACK_EVENT_COUNTER.load(Ordering::Acquire);
-    let mut previous_servo_action = ServoAction::Hold;
+    let mut previous_phase = sequence_phase();
+    let mut servo_command_state = ServoCommandState::new();
 
     loop {
         match select(ticker.next(), CONTROL_UPDATE_SIGNAL.wait()).await {
@@ -78,6 +84,8 @@ pub async fn supervisor_task(
         }
 
         let now = Instant::now();
+        let now_ms = now.as_millis();
+        servo_command_state.update_latch_release(now_ms, OPEN_LATCH_RELEASE_DELAY_MS);
         INPUT_GPIO_STATUS.store(input_gpio_pins.status(), Ordering::Release);
         let inputs = INPUT_FLAGS.load(Ordering::Acquire);
         let mut faults = FAULT_FLAGS.load(Ordering::Acquire);
@@ -88,16 +96,18 @@ pub async fn supervisor_task(
         if has_active_can_input_fault(faults, inputs) {
             replace_operator_input_flags(0);
             enter_abort(sequence_phase(), &mut abort_before_firing);
+            observe_phase_transition(&mut previous_phase, &mut servo_command_state, now_ms);
             firing_started_at = None;
             apply_decision(
-                force_safe_outputs(faults),
+                force_safe_outputs(),
                 &mut ignition,
                 &mut dump,
                 &mut fill,
                 &mut separate,
                 &mut o2,
-                &mut previous_servo_action,
+                None,
             );
+            publish_servo_diagnostics(&servo_command_state);
             continue;
         }
 
@@ -110,20 +120,23 @@ pub async fn supervisor_task(
                 &mut firing_started_at,
                 &mut abort_before_firing,
             );
+            observe_phase_transition(&mut previous_phase, &mut servo_command_state, now_ms);
         }
 
         if faults != 0 && sequence_phase() == SequencePhase::Firing {
             enter_abort(SequencePhase::Firing, &mut abort_before_firing);
+            observe_phase_transition(&mut previous_phase, &mut servo_command_state, now_ms);
             firing_started_at = None;
             apply_decision(
-                force_safe_outputs(faults),
+                force_safe_outputs(),
                 &mut ignition,
                 &mut dump,
                 &mut fill,
                 &mut separate,
                 &mut o2,
-                &mut previous_servo_action,
+                None,
             );
+            publish_servo_diagnostics(&servo_command_state);
             continue;
         }
 
@@ -134,6 +147,7 @@ pub async fn supervisor_task(
                 now,
                 &mut firing_started_at,
                 &mut abort_before_firing,
+                servo_command_state.can_start_firing(),
             ),
             SequencePhase::Firing => handle_firing_phase(inputs, now, &mut firing_started_at),
             SequencePhase::Timeout => {
@@ -146,13 +160,31 @@ pub async fn supervisor_task(
                 &mut abort_before_firing,
             ),
         };
+        observe_phase_transition(&mut previous_phase, &mut servo_command_state, now_ms);
 
-        let decision = resolve_control(
+        let mut decision = resolve_control(
             sequence_phase(),
             FAULT_FLAGS.load(Ordering::Acquire),
             INPUT_FLAGS.load(Ordering::Acquire),
             intent,
         );
+        let firing_open_phase = sequence_phase() == SequencePhase::Firing
+            && firing_started_at.is_some_and(|started| {
+                now.duration_since(started)
+                    >= Duration::from_millis(IGNITION_WAIT_MS + MAIN_VALVE_OPEN_DELAY_MS)
+            });
+        let dispatch = servo_command_state.schedule(
+            sequence_phase().into(),
+            firing_open_phase,
+            decision.servo_action.into(),
+            now_ms,
+            SERVO_POLL_INTERVAL_MS,
+            FIRING_OPEN_SEND_MAX,
+            MAIN_VALVE_OPEN_ANGLE_X10,
+            MAIN_VALVE_CLOSED_ANGLE_X10,
+        );
+        decision.servo_action = dispatch.action.into();
+        log_servo_dispatch(dispatch, &servo_command_state, now_ms);
         apply_decision(
             decision,
             &mut ignition,
@@ -160,8 +192,9 @@ pub async fn supervisor_task(
             &mut fill,
             &mut separate,
             &mut o2,
-            &mut previous_servo_action,
+            dispatch.signal_angle_x10,
         );
+        publish_servo_diagnostics(&servo_command_state);
     }
 }
 
@@ -171,6 +204,7 @@ fn handle_idle_phase(
     now: Instant,
     firing_started_at: &mut Option<Instant>,
     abort_before_firing: &mut bool,
+    can_start_firing: bool,
 ) -> ControlIntent {
     *firing_started_at = None;
 
@@ -178,7 +212,7 @@ fn handle_idle_phase(
         resolve_control(SequencePhase::Idle, faults, inputs, ControlIntent::safe())
             .allow_new_ignition;
 
-    if start_permission && inputs & INPUT_FIRE_REQUEST != 0 {
+    if start_permission && can_start_firing && inputs & INPUT_FIRE_REQUEST != 0 {
         *abort_before_firing = false;
         *firing_started_at = Some(now);
         set_sequence_phase(SequencePhase::Firing);
@@ -251,30 +285,28 @@ fn apply_firing_sequence_outputs(inputs: u32, elapsed: Duration) -> ControlInten
     let mut intent = ControlIntent::safe();
     intent.dump_on = inputs & INPUT_DUMP_REQUEST != 0;
 
-    if elapsed >= Duration::from_millis(IGNITION_WAIT_MS + MAIN_VALVE_OPEN_DELAY_MS) {
+    let valve_open_at_ms = IGNITION_WAIT_MS + MAIN_VALVE_OPEN_DELAY_MS;
+    let o2_off_at_ms = valve_open_at_ms + O2_OFF_DELAY_AFTER_VALVE_OPEN_MS;
+
+    intent.o2_on = elapsed < Duration::from_millis(o2_off_at_ms);
+    intent.ignition_on = elapsed >= Duration::from_millis(IGNITION_WAIT_MS)
+        && elapsed < Duration::from_millis(valve_open_at_ms);
+
+    if elapsed >= Duration::from_millis(valve_open_at_ms) {
         intent.servo_target_angle_x10 = Some(MAIN_VALVE_OPEN_ANGLE_X10);
-    } else if elapsed >= Duration::from_millis(IGNITION_WAIT_MS) {
-        intent.o2_on = true;
-        intent.ignition_on = true;
-    } else {
-        intent.o2_on = true;
     }
 
     intent
 }
 
-fn force_safe_outputs(faults: u8) -> ControlDecision {
+fn force_safe_outputs() -> ControlDecision {
     ControlDecision {
         ignition_on: false,
         dump_on: false,
         fill_on: false,
         separate_on: false,
         o2_on: false,
-        servo_action: if faults & SERVO_FAULTS != 0 {
-            ServoAction::Hold
-        } else {
-            ServoAction::MoveTo(MAIN_VALVE_CLOSED_ANGLE_X10)
-        },
+        servo_action: ServoAction::Hold,
         allow_new_ignition: false,
     }
 }
@@ -316,7 +348,7 @@ fn apply_decision(
     fill: &mut Output<'static>,
     separate: &mut Output<'static>,
     o2: &mut Output<'static>,
-    previous_servo_action: &mut ServoAction,
+    angle_command: Option<i16>,
 ) {
     ignition.set_level(decision.ignition_on.into());
     dump.set_level(decision.dump_on.into());
@@ -349,10 +381,119 @@ fn apply_decision(
         ServoAction::MoveTo(angle_x10) => {
             SERVO_TARGET_ANGLE_X10.store(angle_x10, Ordering::Release);
             SERVO_CONTROL_MODE.store(SERVO_MODE_COMMAND, Ordering::Release);
-            if *previous_servo_action != decision.servo_action {
-                ANGLE_COMMAND_SIGNAL.signal(angle_x10);
-            }
         }
     }
-    *previous_servo_action = decision.servo_action;
+    if let Some(angle_x10) = angle_command {
+        ANGLE_COMMAND_SIGNAL.signal(angle_x10);
+    }
+}
+
+fn observe_phase_transition(
+    previous_phase: &mut SequencePhase,
+    servo_command_state: &mut ServoCommandState,
+    now_ms: u64,
+) {
+    let current_phase = sequence_phase();
+    if current_phase != *previous_phase {
+        servo_command_state.on_phase_transition(current_phase.into(), now_ms);
+        *previous_phase = current_phase;
+    }
+}
+
+fn publish_servo_diagnostics(state: &ServoCommandState) {
+    FIRING_OPEN_LATCHED.store(state.open_latched(), Ordering::Release);
+    FIRING_OPEN_SEND_COUNT.store(state.firing_open_send_count(), Ordering::Release);
+    OPEN_LATCH_RELEASE_PENDING.store(state.release_pending(), Ordering::Release);
+}
+
+#[cfg(feature = "can-debug-log")]
+fn log_servo_dispatch(dispatch: ServoDispatch, state: &ServoCommandState, now_ms: u64) {
+    if let Some(angle_x10) = dispatch.signal_angle_x10 {
+        let kind = if angle_x10 == MAIN_VALVE_OPEN_ANGLE_X10 && state.open_latched() {
+            "firing_open"
+        } else if angle_x10 == MAIN_VALVE_CLOSED_ANGLE_X10 {
+            "close"
+        } else {
+            "manual_open"
+        };
+        println!(
+            "servo_cmd kind={} angle_x10={} open_count={} at_ms={}",
+            kind,
+            angle_x10,
+            state.firing_open_send_count(),
+            now_ms
+        );
+    }
+}
+
+#[cfg(not(feature = "can-debug-log"))]
+fn log_servo_dispatch(_dispatch: ServoDispatch, _state: &ServoCommandState, _now_ms: u64) {}
+
+impl From<SequencePhase> for ServoPhase {
+    fn from(value: SequencePhase) -> Self {
+        match value {
+            SequencePhase::Idle => Self::Idle,
+            SequencePhase::Firing => Self::Firing,
+            SequencePhase::Timeout => Self::Timeout,
+            SequencePhase::Abort => Self::Abort,
+        }
+    }
+}
+
+impl From<ServoAction> for RequestedServoAction {
+    fn from(value: ServoAction) -> Self {
+        match value {
+            ServoAction::Hold => Self::Hold,
+            ServoAction::MoveTo(angle_x10) => Self::MoveTo(angle_x10),
+        }
+    }
+}
+
+impl From<RequestedServoAction> for ServoAction {
+    fn from(value: RequestedServoAction) -> Self {
+        match value {
+            RequestedServoAction::Hold => Self::Hold,
+            RequestedServoAction::MoveTo(angle_x10) => Self::MoveTo(angle_x10),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn firing_outputs_at(elapsed_ms: u64) -> ControlIntent {
+        apply_firing_sequence_outputs(0, Duration::from_millis(elapsed_ms))
+    }
+
+    #[test]
+    fn o2_stays_on_until_two_seconds_after_valve_open_command() {
+        let valve_open_at_ms = IGNITION_WAIT_MS + MAIN_VALVE_OPEN_DELAY_MS;
+
+        assert!(firing_outputs_at(valve_open_at_ms - 1).o2_on);
+        assert!(firing_outputs_at(valve_open_at_ms).o2_on);
+        assert!(firing_outputs_at(valve_open_at_ms + O2_OFF_DELAY_AFTER_VALVE_OPEN_MS - 1).o2_on);
+        assert!(!firing_outputs_at(valve_open_at_ms + O2_OFF_DELAY_AFTER_VALVE_OPEN_MS).o2_on);
+    }
+
+    #[test]
+    fn valve_open_turns_ignition_off_without_turning_o2_off() {
+        let valve_open_at_ms = IGNITION_WAIT_MS + MAIN_VALVE_OPEN_DELAY_MS;
+        let before_open = firing_outputs_at(valve_open_at_ms - 1);
+        let at_open = firing_outputs_at(valve_open_at_ms);
+
+        assert!(before_open.ignition_on);
+        assert_eq!(before_open.servo_target_angle_x10, None);
+        assert!(!at_open.ignition_on);
+        assert!(at_open.o2_on);
+        assert_eq!(
+            at_open.servo_target_angle_x10,
+            Some(MAIN_VALVE_OPEN_ANGLE_X10)
+        );
+    }
+
+    #[test]
+    fn force_safe_outputs_turns_o2_off_immediately() {
+        assert!(!force_safe_outputs().o2_on);
+    }
 }

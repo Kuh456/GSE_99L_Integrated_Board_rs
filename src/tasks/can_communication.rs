@@ -14,8 +14,8 @@ use crate::{
     CAN_TX_TIMEOUT, CAN_TX_TIMEOUT_MS, COMMUNICATION_TIMEOUT_MS, CURRENT_POSITION, FAULT_FLAGS,
     INPUT_CAN_LINK_ACTIVE, INPUT_DUMP_REQUEST, INPUT_FILL_REQUEST, INPUT_FIRE_REQUEST, INPUT_FLAGS,
     INPUT_GPIO_STATUS, INPUT_O2_TEST_REQUEST, INPUT_RESET_ACK_REQUEST, INPUT_SEPARATE_REQUEST,
-    INPUT_VALVE_OPEN_REQUEST, INPUT_VALVE_SET_REQUEST, OUTPUT_STATUS,
-    SERVO_COMM_ACTIVE, SERVO_COMM_ERROR,
+    INPUT_VALVE_OPEN_REQUEST, INPUT_VALVE_SET_REQUEST, OUTPUT_STATUS, SERVO_COMM_ERROR,
+    SERVO_COMM_ERROR_COUNT, SERVO_COMM_ERROR_LIMIT,
     can::{
         health::{CanHealth, classify_can_health},
         protocol::{CAN_ID_BUTTON_FROM_CTRL_PANEL, CanDecodeError, GseCanMessage},
@@ -293,7 +293,7 @@ async fn transmit_probe(can: &mut twai::Twai<'static, Async>) -> Result<(), CanT
 
 fn internal_status_message() -> GseCanMessage {
     let mut flags = FAULT_FLAGS.load(Ordering::Acquire);
-    if !SERVO_COMM_ACTIVE.load(Ordering::Acquire) {
+    if SERVO_COMM_ERROR_COUNT.load(Ordering::Acquire) >= SERVO_COMM_ERROR_LIMIT {
         flags |= SERVO_COMM_ERROR;
     }
 

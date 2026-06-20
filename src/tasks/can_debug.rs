@@ -5,7 +5,8 @@ use esp_println::println;
 
 use crate::{
     CAN_COMM_ACTIVE, CAN_HEALTH, CAN_REC, CAN_RX_ERROR_COUNT, CAN_TEC, CAN_TX_ERROR_COUNT,
-    FAULT_FLAGS,
+    FAULT_FLAGS, FIRING_OPEN_LATCHED, FIRING_OPEN_SEND_COUNT, OPEN_LATCH_RELEASE_PENDING,
+    SERVO_CONTROL_MODE, SERVO_TARGET_ANGLE_X10,
 };
 
 const CAN_DEBUG_LOG_INTERVAL_MS: u64 = 1000;
@@ -25,7 +26,7 @@ pub async fn can_debug_log_task() {
 
 fn print_can_debug_status() {
     println!(
-        "can_dbg CAN_COMM_ACTIVE={} CAN_HEALTH={} CAN_TEC={} CAN_REC={} FAULT_FLAGS=0x{:02X} CAN_TX_ERROR_COUNT={} CAN_RX_ERROR_COUNT={}",
+        "can_dbg CAN_COMM_ACTIVE={} CAN_HEALTH={} CAN_TEC={} CAN_REC={} FAULT_FLAGS=0x{:02X} CAN_TX_ERROR_COUNT={} CAN_RX_ERROR_COUNT={} OPEN_LATCHED={} OPEN_SEND_COUNT={} OPEN_RELEASE_PENDING={} SERVO_MODE={} SERVO_TARGET_X10={}",
         CAN_COMM_ACTIVE.load(Ordering::Acquire),
         CAN_HEALTH.load(Ordering::Acquire),
         CAN_TEC.load(Ordering::Relaxed),
@@ -33,5 +34,10 @@ fn print_can_debug_status() {
         FAULT_FLAGS.load(Ordering::Acquire),
         CAN_TX_ERROR_COUNT.load(Ordering::Relaxed),
         CAN_RX_ERROR_COUNT.load(Ordering::Relaxed),
+        FIRING_OPEN_LATCHED.load(Ordering::Acquire),
+        FIRING_OPEN_SEND_COUNT.load(Ordering::Acquire),
+        OPEN_LATCH_RELEASE_PENDING.load(Ordering::Acquire),
+        SERVO_CONTROL_MODE.load(Ordering::Acquire),
+        SERVO_TARGET_ANGLE_X10.load(Ordering::Acquire),
     );
 }
