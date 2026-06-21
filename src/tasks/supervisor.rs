@@ -15,9 +15,10 @@ use crate::{
     INPUT_VALVE_SET_REQUEST, MAIN_VALVE_CLOSED_ANGLE_X10, MAIN_VALVE_OPEN_ANGLE_X10,
     MAIN_VALVE_OPEN_DELAY_MS, O2_OFF_DELAY_AFTER_VALVE_OPEN_MS, OPEN_LATCH_RELEASE_DELAY_MS,
     OPEN_LATCH_RELEASE_PENDING, OUT_DUMP, OUT_FILL, OUT_IGNITER, OUT_O2, OUT_SEPARATE,
-    OUTPUT_STATUS, RESET_ACK_EVENT_COUNTER, SERVO_CONTROL_MODE, SERVO_MODE_COMMAND,
-    SERVO_MODE_HOLD, SERVO_POLL_INTERVAL_MS, SERVO_TARGET_ANGLE_X10, SUPERVISOR_INTERVAL_MS,
-    SequencePhase, ServoAction, replace_operator_input_flags, resolve_control, sequence_phase,
+    OUTPUT_STATUS, RESET_ACK_EVENT_COUNTER, SERVO_COMM_ERROR, SERVO_CONTROL_MODE,
+    SERVO_MODE_COMMAND, SERVO_MODE_HOLD, SERVO_POLL_INTERVAL_MS, SERVO_TARGET_ANGLE_X10,
+    SUPERVISOR_INTERVAL_MS, SequencePhase, ServoAction, replace_operator_input_flags,
+    resolve_control, sequence_phase,
     servo_control::{RequestedServoAction, ServoCommandState, ServoDispatch, ServoPhase},
     set_sequence_phase,
 };
@@ -74,6 +75,7 @@ pub async fn supervisor_task(
     let mut ticker = Ticker::every(Duration::from_millis(SUPERVISOR_INTERVAL_MS));
     let mut firing_started_at: Option<Instant> = None;
     let mut abort_before_firing = false;
+    let mut servo_abort_latched = false;
     let mut previous_reset_ack_event = RESET_ACK_EVENT_COUNTER.load(Ordering::Acquire);
     let mut previous_phase = sequence_phase();
     let mut servo_command_state = ServoCommandState::new();
@@ -92,6 +94,10 @@ pub async fn supervisor_task(
         let reset_ack_event = RESET_ACK_EVENT_COUNTER.load(Ordering::Acquire);
         let reset_ack_edge = reset_ack_event != previous_reset_ack_event;
         previous_reset_ack_event = reset_ack_event;
+
+        if has_firing_fault(faults, sequence_phase()) && faults & SERVO_COMM_ERROR != 0 {
+            servo_abort_latched = true;
+        }
 
         if has_active_can_input_fault(faults, inputs) {
             replace_operator_input_flags(0);
@@ -117,13 +123,14 @@ pub async fn supervisor_task(
                 reset_ack_edge,
                 inputs,
                 faults,
+                servo_abort_latched,
                 &mut firing_started_at,
                 &mut abort_before_firing,
             );
             observe_phase_transition(&mut previous_phase, &mut servo_command_state, now_ms);
         }
 
-        if faults != 0 && sequence_phase() == SequencePhase::Firing {
+        if has_firing_fault(faults, sequence_phase()) {
             enter_abort(SequencePhase::Firing, &mut abort_before_firing);
             observe_phase_transition(&mut previous_phase, &mut servo_command_state, now_ms);
             firing_started_at = None;
@@ -315,23 +322,44 @@ fn has_active_can_input_fault(faults: u8, inputs: u32) -> bool {
     faults & CAN_FAULTS != 0 && inputs & INPUT_CAN_LINK_ACTIVE == 0
 }
 
+fn has_firing_fault(faults: u8, phase: SequencePhase) -> bool {
+    faults != 0 && phase == SequencePhase::Firing
+}
+
 fn return_to_idle_after_reset_ack(
     reset_ack_edge: bool,
     inputs: u32,
     faults: u8,
+    servo_abort_latched: bool,
     firing_started_at: &mut Option<Instant>,
     abort_before_firing: &mut bool,
 ) {
-    if reset_ack_edge
-        && faults == 0
-        && sequence_phase() == SequencePhase::Abort
-        && inputs & INPUT_OPERATOR_ACTION_MASK == 0
-        && inputs & INPUT_CAN_LINK_ACTIVE != 0
-    {
+    if reset_ack_allows_idle(
+        reset_ack_edge,
+        inputs,
+        faults,
+        servo_abort_latched,
+        sequence_phase(),
+    ) {
         *abort_before_firing = false;
         *firing_started_at = None;
         set_sequence_phase(SequencePhase::Idle);
     }
+}
+
+fn reset_ack_allows_idle(
+    reset_ack_edge: bool,
+    inputs: u32,
+    faults: u8,
+    servo_abort_latched: bool,
+    phase: SequencePhase,
+) -> bool {
+    reset_ack_edge
+        && faults == 0
+        && !servo_abort_latched
+        && phase == SequencePhase::Abort
+        && inputs & INPUT_OPERATOR_ACTION_MASK == 0
+        && inputs & INPUT_CAN_LINK_ACTIVE != 0
 }
 
 fn enter_abort(current_phase: SequencePhase, abort_before_firing: &mut bool) {
@@ -495,5 +523,31 @@ mod tests {
     #[test]
     fn force_safe_outputs_turns_o2_off_immediately() {
         assert!(!force_safe_outputs().o2_on);
+    }
+
+    #[test]
+    fn servo_abort_latch_blocks_reset_ack_return_to_idle() {
+        assert!(!reset_ack_allows_idle(
+            true,
+            INPUT_CAN_LINK_ACTIVE,
+            0,
+            true,
+            SequencePhase::Abort,
+        ));
+        assert!(reset_ack_allows_idle(
+            true,
+            INPUT_CAN_LINK_ACTIVE,
+            0,
+            false,
+            SequencePhase::Abort,
+        ));
+    }
+
+    #[test]
+    fn servo_fault_requests_abort_only_during_firing() {
+        assert!(!has_firing_fault(SERVO_COMM_ERROR, SequencePhase::Idle));
+        assert!(has_firing_fault(SERVO_COMM_ERROR, SequencePhase::Firing));
+        assert!(!has_firing_fault(SERVO_COMM_ERROR, SequencePhase::Timeout));
+        assert!(!has_firing_fault(SERVO_COMM_ERROR, SequencePhase::Abort));
     }
 }

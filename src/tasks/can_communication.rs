@@ -14,8 +14,7 @@ use crate::{
     CAN_TX_TIMEOUT, CAN_TX_TIMEOUT_MS, COMMUNICATION_TIMEOUT_MS, CURRENT_POSITION, FAULT_FLAGS,
     INPUT_CAN_LINK_ACTIVE, INPUT_DUMP_REQUEST, INPUT_FILL_REQUEST, INPUT_FIRE_REQUEST, INPUT_FLAGS,
     INPUT_GPIO_STATUS, INPUT_O2_TEST_REQUEST, INPUT_RESET_ACK_REQUEST, INPUT_SEPARATE_REQUEST,
-    INPUT_VALVE_OPEN_REQUEST, INPUT_VALVE_SET_REQUEST, OUTPUT_STATUS, SERVO_COMM_ERROR,
-    SERVO_COMM_ERROR_COUNT, SERVO_COMM_ERROR_LIMIT,
+    INPUT_VALVE_OPEN_REQUEST, INPUT_VALVE_SET_REQUEST, OUTPUT_STATUS,
     can::{
         health::{CanHealth, classify_can_health},
         protocol::{CAN_ID_BUTTON_FROM_CTRL_PANEL, CanDecodeError, GseCanMessage},
@@ -47,6 +46,7 @@ pub async fn can_manager_task(mut can: twai::Twai<'static, Async>) {
     let mut restart_attempted = false;
     let mut tx_runtime_state = CanTxRuntimeState::Normal;
     let mut status_slot = 0u8;
+    let mut last_sent_logger_counter: Option<u16> = None;
     let mut reset_ack_prev = false;
     let mut tx_ticker = Ticker::every(Duration::from_millis(CAN_STATUS_TX_INTERVAL_MS));
     let mut health_ticker = Ticker::every(Duration::from_millis(CAN_HEALTH_MONITOR_INTERVAL_MS));
@@ -91,7 +91,13 @@ pub async fn can_manager_task(mut can: twai::Twai<'static, Async>) {
                     match tx_runtime_state {
                         CanTxRuntimeState::Normal => {
                             if can_tx_allowed(tx_runtime_state, false) {
-                                match transmit_status_frame(&mut can, status_slot).await {
+                                match transmit_status_frame(
+                                    &mut can,
+                                    status_slot,
+                                    &mut last_sent_logger_counter,
+                                )
+                                .await
+                                {
                                     Ok(()) => status_slot = (status_slot + 1) % STATUS_FRAME_COUNT,
                                     Err(error) => {
                                         try_restart |=
@@ -254,6 +260,7 @@ fn can_tx_allowed(tx_runtime_state: CanTxRuntimeState, probe: bool) -> bool {
 async fn transmit_status_frame(
     can: &mut twai::Twai<'static, Async>,
     status_slot: u8,
+    last_sent_logger_counter: &mut Option<u16>,
 ) -> Result<(), CanTxError> {
     let msg = match status_slot % STATUS_FRAME_COUNT {
         0 => GseCanMessage::OutputGpioStatus {
@@ -266,20 +273,38 @@ async fn transmit_status_frame(
             angle_x10: position_to_angle_x10(CURRENT_POSITION.load(Ordering::Acquire)),
         },
         3 => internal_status_message(),
-        _ => {
-            let Some(log_data) = latest_log_data() else {
-                return Ok(());
-            };
-            GseCanMessage::LoggerData {
-                adc0: log_data.adc0,
-                adc2: log_data.adc2,
-                adc3: log_data.adc3,
-                counter: log_data.counter,
-            }
-        }
+        _ => return transmit_logger_data(can, last_sent_logger_counter).await,
     };
 
     transmit(can, msg, can_tx_allowed(CanTxRuntimeState::Normal, false)).await
+}
+
+async fn transmit_logger_data(
+    can: &mut twai::Twai<'static, Async>,
+    last_sent_logger_counter: &mut Option<u16>,
+) -> Result<(), CanTxError> {
+    let Some(log_data) = latest_log_data() else {
+        return Ok(());
+    };
+
+    if !logger_counter_is_new(*last_sent_logger_counter, log_data.counter) {
+        return Ok(());
+    }
+
+    let msg = GseCanMessage::LoggerData {
+        adc0: log_data.adc0,
+        adc2: log_data.adc2,
+        adc3: log_data.adc3,
+        counter: log_data.counter,
+    };
+
+    transmit(can, msg, can_tx_allowed(CanTxRuntimeState::Normal, false)).await?;
+    *last_sent_logger_counter = Some(log_data.counter);
+    Ok(())
+}
+
+fn logger_counter_is_new(last_sent: Option<u16>, current: u16) -> bool {
+    last_sent != Some(current)
 }
 
 async fn transmit_probe(can: &mut twai::Twai<'static, Async>) -> Result<(), CanTxError> {
@@ -292,14 +317,9 @@ async fn transmit_probe(can: &mut twai::Twai<'static, Async>) -> Result<(), CanT
 }
 
 fn internal_status_message() -> GseCanMessage {
-    let mut flags = FAULT_FLAGS.load(Ordering::Acquire);
-    if SERVO_COMM_ERROR_COUNT.load(Ordering::Acquire) >= SERVO_COMM_ERROR_LIMIT {
-        flags |= SERVO_COMM_ERROR;
-    }
-
     GseCanMessage::InternalStatus {
         phase: sequence_phase() as u8,
-        flags,
+        flags: FAULT_FLAGS.load(Ordering::Acquire),
     }
 }
 
@@ -415,4 +435,17 @@ fn inhibit_can_inputs() {
         update_input_flag(INPUT_CAN_LINK_ACTIVE, false);
     }
     replace_operator_input_flags(0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn logger_counter_sends_only_new_samples() {
+        assert!(logger_counter_is_new(None, 1));
+        assert!(!logger_counter_is_new(Some(1), 1));
+        assert!(logger_counter_is_new(Some(1), 2));
+        assert!(logger_counter_is_new(Some(u16::MAX), 0));
+    }
 }

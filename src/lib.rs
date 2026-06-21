@@ -41,8 +41,8 @@ pub const SERVO_COMM_ERROR_LIMIT: u8 = 10;
 pub const FIRING_OPEN_SEND_MAX: u8 = 10;
 pub const OPEN_LATCH_RELEASE_DELAY_MS: u64 = 10_000;
 
-// Latched fault flags. Fault removal is an explicit reset operation, never a side effect of
-// receiving traffic again.
+// Fault flags. CAN faults are latched until an explicit reset; the servo communication fault
+// clears automatically after a successful servo transaction.
 pub const CAN_PEER_LOST: u8 = 1 << 0;
 pub const CAN_BUS_OFF: u8 = 1 << 1;
 pub const SERVO_COMM_ERROR: u8 = 1 << 2;
@@ -71,6 +71,14 @@ pub fn set_fault_flags(flags: u8) {
 pub fn clear_fault_flags_for_reset(flags: u8) {
     FAULT_FLAGS.fetch_and(!flags, Ordering::AcqRel);
     CONTROL_UPDATE_SIGNAL.signal(());
+}
+
+/// Clears faults whose recovery policy is a successful retry.
+pub(crate) fn clear_fault_flags_on_recovery(flags: u8) {
+    let previous = FAULT_FLAGS.fetch_and(!flags, Ordering::AcqRel);
+    if previous & flags != 0 {
+        CONTROL_UPDATE_SIGNAL.signal(());
+    }
 }
 
 // Input conditions and operator requests.
