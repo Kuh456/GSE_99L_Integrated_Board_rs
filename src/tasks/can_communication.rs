@@ -20,9 +20,9 @@ use crate::{
         protocol::{CAN_ID_BUTTON_FROM_CTRL_PANEL, CanDecodeError, GseCanMessage},
         tx::{CanTxError, create_frame_from_message, transmit_frame_with_timeout},
     },
-    clear_fault_flags_for_reset, position_to_angle_x10, replace_operator_input_flags,
-    replace_operator_input_flags_and_set_can_link_active, sequence_phase, set_fault_flags,
-    signal_reset_ack_event,
+    clear_fault_flags_for_reset, clear_fault_flags_on_recovery, position_to_angle_x10,
+    replace_operator_input_flags, replace_operator_input_flags_and_set_can_link_active,
+    sequence_phase, set_fault_flags, signal_reset_ack_event,
     tasks::espnow::latest_log_data,
     update_input_flag,
 };
@@ -160,10 +160,11 @@ fn handle_received_frame(
                 return false;
             }
 
-            // A valid fresh command frame makes operator input trustworthy again. Latched CAN
-            // fault flags remain for status/reset policy, and the supervisor keeps Abort.
+            // A valid fresh command frame makes operator input trustworthy again and proves that
+            // CAN faults allowed by the current health/runtime state have recovered.
             CAN_COMM_ACTIVE.store(true, Ordering::Release);
             replace_operator_input_flags_and_set_can_link_active(button_inputs(raw));
+            clear_recovered_can_faults(health, tx_runtime_state);
 
             if reset_ack_now && !*reset_ack_prev && raw & BUTTON_COMMAND_BITS == 0 {
                 handle_reset_ack_edge(tx_runtime_state);
@@ -230,6 +231,25 @@ fn handle_reset_ack_edge(tx_runtime_state: CanTxRuntimeState) {
         clear_fault_flags_for_reset(faults_to_clear);
     }
     signal_reset_ack_event();
+}
+
+fn clear_recovered_can_faults(health: CanHealth, tx_runtime_state: CanTxRuntimeState) {
+    let clearable_faults = recoverable_can_faults(health, tx_runtime_state);
+    let faults_to_clear = FAULT_FLAGS.load(Ordering::Acquire) & clearable_faults;
+    if faults_to_clear != 0 {
+        clear_fault_flags_on_recovery(faults_to_clear);
+    }
+}
+
+fn recoverable_can_faults(health: CanHealth, tx_runtime_state: CanTxRuntimeState) -> u8 {
+    let mut faults = CAN_PEER_LOST;
+    if tx_runtime_state == CanTxRuntimeState::Normal {
+        faults |= CAN_TX_TIMEOUT;
+    }
+    if health == CanHealth::Active {
+        faults |= CAN_BUS_OFF;
+    }
+    faults
 }
 
 fn update_peer_liveness(start: Instant, last_peer_rx: Option<Instant>) {
@@ -447,5 +467,22 @@ mod tests {
         assert!(!logger_counter_is_new(Some(1), 1));
         assert!(logger_counter_is_new(Some(1), 2));
         assert!(logger_counter_is_new(Some(u16::MAX), 0));
+    }
+
+    #[test]
+    fn valid_rx_clears_only_faults_proven_recovered() {
+        assert_eq!(
+            recoverable_can_faults(CanHealth::Active, CanTxRuntimeState::Normal),
+            CAN_PEER_LOST | CAN_TX_TIMEOUT | CAN_BUS_OFF
+        );
+        assert_eq!(
+            recoverable_can_faults(CanHealth::Warning, CanTxRuntimeState::SuspendedAfterTimeout),
+            CAN_PEER_LOST
+        );
+        assert_eq!(
+            recoverable_can_faults(CanHealth::Active, CanTxRuntimeState::Normal)
+                & CAN_TX_FRAME_CREATE_FAILED,
+            0
+        );
     }
 }

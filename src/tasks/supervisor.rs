@@ -130,6 +130,15 @@ pub async fn supervisor_task(
             observe_phase_transition(&mut previous_phase, &mut servo_command_state, now_ms);
         }
 
+        faults = FAULT_FLAGS.load(Ordering::Acquire);
+        return_to_idle_after_pre_firing_recovery(
+            inputs,
+            faults,
+            &mut firing_started_at,
+            &mut abort_before_firing,
+        );
+        observe_phase_transition(&mut previous_phase, &mut servo_command_state, now_ms);
+
         if has_firing_fault(faults, sequence_phase()) {
             enter_abort(SequencePhase::Firing, &mut abort_before_firing);
             observe_phase_transition(&mut previous_phase, &mut servo_command_state, now_ms);
@@ -362,6 +371,32 @@ fn reset_ack_allows_idle(
         && inputs & INPUT_CAN_LINK_ACTIVE != 0
 }
 
+fn return_to_idle_after_pre_firing_recovery(
+    inputs: u32,
+    faults: u8,
+    firing_started_at: &mut Option<Instant>,
+    abort_before_firing: &mut bool,
+) {
+    if pre_firing_recovery_allows_idle(inputs, faults, *abort_before_firing, sequence_phase()) {
+        *abort_before_firing = false;
+        *firing_started_at = None;
+        set_sequence_phase(SequencePhase::Idle);
+    }
+}
+
+fn pre_firing_recovery_allows_idle(
+    inputs: u32,
+    faults: u8,
+    abort_before_firing: bool,
+    phase: SequencePhase,
+) -> bool {
+    abort_before_firing
+        && faults == 0
+        && phase == SequencePhase::Abort
+        && inputs & INPUT_OPERATOR_ACTION_MASK == 0
+        && inputs & INPUT_CAN_LINK_ACTIVE != 0
+}
+
 fn enter_abort(current_phase: SequencePhase, abort_before_firing: &mut bool) {
     if current_phase != SequencePhase::Abort {
         *abort_before_firing = current_phase == SequencePhase::Idle;
@@ -526,6 +561,17 @@ mod tests {
     }
 
     #[test]
+    fn abort_forces_servo_hold_even_with_a_valve_request() {
+        let intent = ControlIntent {
+            servo_target_angle_x10: Some(MAIN_VALVE_OPEN_ANGLE_X10),
+            ..ControlIntent::safe()
+        };
+        let decision = resolve_control(SequencePhase::Abort, 0, INPUT_CAN_LINK_ACTIVE, intent);
+
+        assert_eq!(decision.servo_action, ServoAction::Hold);
+    }
+
+    #[test]
     fn servo_abort_latch_blocks_reset_ack_return_to_idle() {
         assert!(!reset_ack_allows_idle(
             true,
@@ -549,5 +595,37 @@ mod tests {
         assert!(has_firing_fault(SERVO_COMM_ERROR, SequencePhase::Firing));
         assert!(!has_firing_fault(SERVO_COMM_ERROR, SequencePhase::Timeout));
         assert!(!has_firing_fault(SERVO_COMM_ERROR, SequencePhase::Abort));
+    }
+
+    #[test]
+    fn pre_firing_abort_returns_to_idle_after_neutral_recovery() {
+        assert!(pre_firing_recovery_allows_idle(
+            INPUT_CAN_LINK_ACTIVE,
+            0,
+            true,
+            SequencePhase::Abort,
+        ));
+    }
+
+    #[test]
+    fn pre_firing_abort_recovery_requires_no_faults_and_neutral_input() {
+        assert!(!pre_firing_recovery_allows_idle(
+            INPUT_CAN_LINK_ACTIVE,
+            SERVO_COMM_ERROR,
+            true,
+            SequencePhase::Abort,
+        ));
+        assert!(!pre_firing_recovery_allows_idle(
+            INPUT_CAN_LINK_ACTIVE | INPUT_FIRE_REQUEST,
+            0,
+            true,
+            SequencePhase::Abort,
+        ));
+        assert!(!pre_firing_recovery_allows_idle(
+            INPUT_CAN_LINK_ACTIVE,
+            0,
+            false,
+            SequencePhase::Abort,
+        ));
     }
 }

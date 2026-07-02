@@ -1,5 +1,46 @@
 # GSE Integrated Board
 
+## CAN Fire Test
+
+`can_fire` は、コントロールパネルからの CAN コマンドで点火出力を確認する
+ハードウェアテストです。ESP32 と CAN トランシーバーを接続した状態で、次の
+コマンドを実行してください。
+
+```bash
+cargo test --test can_fire --features hardware-test
+```
+
+プロジェクトの runner により、テストファームウェアの書き込み後にシリアル
+モニターが開きます。使用する端子と CAN 設定は次のとおりです。
+
+- CAN TX: GPIO18
+- CAN RX: GPIO4
+- FIRE/IGNITER 出力: GPIO13
+- CAN ビットレート: 125 kbit/s
+
+起動すると、シリアルモニターに次のバナーが表示されます。
+
+```text
+========== CAN FIRE TEST START ==========
+CAN: TWAI0 baud=125k tx=GPIO18 rx=GPIO4
+OUTPUT: FIRE/IGNITER=GPIO13
+```
+
+コントロールパネルから `ButtonFromCtrlPanel` フレームを送信すると、データの
+bit 1 が `1` の間は GPIO13 が High、`0` の間は Low になります。状態が変わると
+`fire=ON` または `fire=OFF` が表示されます。最後の有効なコマンドから 500 ms
+以内に次のコマンドを受信しなかった場合、出力は自動的に Low になります。
+
+テスト基板からは5種類の状態フレームを50 ms間隔で巡回送信します。一時的な
+送信失敗では同じフレームを次周期に再送します。送信タイムアウトまたは
+Bus-Offが発生すると点火出力をLowにして周期送信を停止し、有効な
+`ButtonFromCtrlPanel`を受信した後にprobe送信を行います。probeに成功すると
+通常の周期送信へ戻ります。復帰後、次の有効なFIREコマンドから点火出力を
+操作できます。
+
+> 点火出力を扱うテストです。実際の点火装置を外した安全な状態で、GPIO13 の
+> 出力を測定して確認してください。
+
 ## CAN Debug Logs
 
 CAN debug logging is opt-in. Run the firmware with the `can-debug-log` feature to print

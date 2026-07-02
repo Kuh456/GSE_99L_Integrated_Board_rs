@@ -26,6 +26,12 @@ path = "./tests/solenoid_ignition.rs"
 harness = false
 required-features = ["hardware-test"]
 
+[[test]]
+name = "can_fire"
+path = "./tests/can_fire.rs"
+harness = false
+required-features = ["hardware-test"]
+
 [dependencies]
 esp-hal = { version = "1.1.1", features = ["esp32", "unstable","log-04"] }
 

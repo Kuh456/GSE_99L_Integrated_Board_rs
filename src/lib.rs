@@ -21,7 +21,7 @@ pub const SUPERVISOR_INTERVAL_MS: u64 = 10;
 
 // Sequence timing.
 pub const IGNITION_WAIT_MS: u64 = 10000;
-pub const MAIN_VALVE_OPEN_DELAY_MS: u64 = 3000;
+pub const MAIN_VALVE_OPEN_DELAY_MS: u64 = 3200;
 pub const O2_OFF_DELAY_AFTER_VALVE_OPEN_MS: u64 = 2000;
 pub const IGNITION_SEQUENCE_TIMEOUT_MS: u64 = 10000;
 pub const RUNNING_DURATION_MS: u64 = IGNITION_SEQUENCE_TIMEOUT_MS;
@@ -241,7 +241,9 @@ pub fn resolve_control(
         SequencePhase::Idle | SequencePhase::Timeout | SequencePhase::Abort
     );
     let firing_phase = phase == SequencePhase::Firing;
-    let servo_allowed = fault_flags & SERVO_FAULTS == 0 && !(firing_phase && fault_flags != 0);
+    let servo_allowed = phase != SequencePhase::Abort
+        && fault_flags & SERVO_FAULTS == 0
+        && !(firing_phase && fault_flags != 0);
 
     ControlDecision {
         ignition_on: firing_phase && intent.ignition_on && fault_flags == 0,
