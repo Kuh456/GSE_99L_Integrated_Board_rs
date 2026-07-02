@@ -26,11 +26,12 @@ use esp_println::println;
 use esp_rtos::embassy::Executor;
 #[cfg(feature = "can-debug-log")]
 use gse_integrated_board::tasks::can_debug::can_debug_log_task;
+#[cfg(feature = "espnow")]
+use gse_integrated_board::tasks::espnow::{espnow_receive_task, initialize_espnow};
 use gse_integrated_board::{
     krs_servo::IcsDevice,
     tasks::{
         can_communication::can_manager_task,
-        espnow::{espnow_receive_task, initialize_espnow},
         servo::servo_task,
         status_led::status_led_task,
         supervisor::{InputGpioPins, supervisor_task},
@@ -86,6 +87,7 @@ async fn main(spawner: Spawner) -> ! {
         .with_rx(servo_rx)
         .with_tx(servo_tx);
     let servo = IcsDevice::new(uart, servo_enable);
+    #[cfg(feature = "espnow")]
     let (wifi_controller, esp_now) = initialize_espnow(peripherals.WIFI);
 
     esp_rtos::start_second_core(
@@ -126,6 +128,7 @@ async fn main(spawner: Spawner) -> ! {
         },
     );
 
+    #[cfg(feature = "espnow")]
     spawner.spawn(espnow_receive_task(wifi_controller, esp_now).unwrap());
     spawner.spawn(servo_task(servo).unwrap());
     spawner.spawn(status_led_task(led_servo_com_state, led_can_com_state).unwrap());

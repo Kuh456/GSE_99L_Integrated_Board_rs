@@ -8,6 +8,8 @@ use esp_hal::{
     twai::{self, ErrorKind as TwaiErrorKind, EspTwaiError, EspTwaiFrame},
 };
 
+#[cfg(feature = "espnow")]
+use crate::tasks::espnow::latest_log_data;
 use crate::{
     CAN_BUS_OFF, CAN_COMM_ACTIVE, CAN_HEALTH, CAN_PEER_LOST, CAN_REC, CAN_RX_ERROR_COUNT,
     CAN_STATUS_TX_INTERVAL_MS, CAN_TEC, CAN_TX_ERROR_COUNT, CAN_TX_FRAME_CREATE_FAILED,
@@ -22,15 +24,16 @@ use crate::{
     },
     clear_fault_flags_for_reset, clear_fault_flags_on_recovery, position_to_angle_x10,
     replace_operator_input_flags, replace_operator_input_flags_and_set_can_link_active,
-    sequence_phase, set_fault_flags, signal_reset_ack_event,
-    tasks::espnow::latest_log_data,
-    update_input_flag,
+    sequence_phase, set_fault_flags, signal_reset_ack_event, update_input_flag,
 };
 
 const CAN_HEALTH_MONITOR_INTERVAL_MS: u64 = 100;
 const BUTTON_RESET_ACK_BIT: u8 = 1 << 7;
 const BUTTON_COMMAND_BITS: u8 = BUTTON_RESET_ACK_BIT - 1;
+#[cfg(feature = "espnow")]
 const STATUS_FRAME_COUNT: u8 = 5;
+#[cfg(not(feature = "espnow"))]
+const STATUS_FRAME_COUNT: u8 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CanTxRuntimeState {
@@ -46,6 +49,7 @@ pub async fn can_manager_task(mut can: twai::Twai<'static, Async>) {
     let mut restart_attempted = false;
     let mut tx_runtime_state = CanTxRuntimeState::Normal;
     let mut status_slot = 0u8;
+    #[cfg(feature = "espnow")]
     let mut last_sent_logger_counter: Option<u16> = None;
     let mut reset_ack_prev = false;
     let mut tx_ticker = Ticker::every(Duration::from_millis(CAN_STATUS_TX_INTERVAL_MS));
@@ -91,13 +95,18 @@ pub async fn can_manager_task(mut can: twai::Twai<'static, Async>) {
                     match tx_runtime_state {
                         CanTxRuntimeState::Normal => {
                             if can_tx_allowed(tx_runtime_state, false) {
-                                match transmit_status_frame(
+                                #[cfg(feature = "espnow")]
+                                let transmit_result = transmit_status_frame(
                                     &mut can,
                                     status_slot,
                                     &mut last_sent_logger_counter,
                                 )
-                                .await
-                                {
+                                .await;
+                                #[cfg(not(feature = "espnow"))]
+                                let transmit_result =
+                                    transmit_status_frame(&mut can, status_slot).await;
+
+                                match transmit_result {
                                     Ok(()) => status_slot = (status_slot + 1) % STATUS_FRAME_COUNT,
                                     Err(error) => {
                                         try_restart |=
@@ -280,7 +289,7 @@ fn can_tx_allowed(tx_runtime_state: CanTxRuntimeState, probe: bool) -> bool {
 async fn transmit_status_frame(
     can: &mut twai::Twai<'static, Async>,
     status_slot: u8,
-    last_sent_logger_counter: &mut Option<u16>,
+    #[cfg(feature = "espnow")] last_sent_logger_counter: &mut Option<u16>,
 ) -> Result<(), CanTxError> {
     let msg = match status_slot % STATUS_FRAME_COUNT {
         0 => GseCanMessage::OutputGpioStatus {
@@ -293,12 +302,16 @@ async fn transmit_status_frame(
             angle_x10: position_to_angle_x10(CURRENT_POSITION.load(Ordering::Acquire)),
         },
         3 => internal_status_message(),
+        #[cfg(feature = "espnow")]
         _ => return transmit_logger_data(can, last_sent_logger_counter).await,
+        #[cfg(not(feature = "espnow"))]
+        _ => unreachable!(),
     };
 
     transmit(can, msg, can_tx_allowed(CanTxRuntimeState::Normal, false)).await
 }
 
+#[cfg(feature = "espnow")]
 async fn transmit_logger_data(
     can: &mut twai::Twai<'static, Async>,
     last_sent_logger_counter: &mut Option<u16>,
@@ -323,6 +336,7 @@ async fn transmit_logger_data(
     Ok(())
 }
 
+#[cfg(feature = "espnow")]
 fn logger_counter_is_new(last_sent: Option<u16>, current: u16) -> bool {
     last_sent != Some(current)
 }
@@ -461,6 +475,7 @@ fn inhibit_can_inputs() {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "espnow")]
     #[test]
     fn logger_counter_sends_only_new_samples() {
         assert!(logger_counter_is_new(None, 1));

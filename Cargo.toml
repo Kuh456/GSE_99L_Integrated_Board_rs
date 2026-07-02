@@ -10,6 +10,7 @@ path = "./src/bin/main.rs"
 
 [features]
 default = []
+espnow = ["dep:esp-radio", "esp-rtos/esp-radio"]
 can-debug-log = []
 servo-debug-log = []
 hardware-test = []
@@ -36,7 +37,7 @@ required-features = ["hardware-test"]
 esp-hal = { version = "1.1.1", features = ["esp32", "unstable","log-04"] }
 
 esp-rtos = { version = "0.3.0", features = ["embassy",  "esp-alloc",
-  "esp-radio", "esp32","log-04"] }
+  "esp32","log-04"] }
 
 esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32"] }
 
@@ -71,7 +72,7 @@ esp-radio = { version = "0.18.0", features = [
   "unstable",
   "wifi",
   "esp-now",
-] }
+], optional = true }
 
 [profile.dev]
 # Rust debug is too slow.
